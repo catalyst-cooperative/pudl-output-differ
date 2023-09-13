@@ -45,10 +45,11 @@ class OutputDirectoryEvaluator(DiffEvaluatorBase):
         lfs = self.get_files(self.left_path)
         rfs = self.get_files(self.right_path)
 
-        files_node = DiffTreeNode(
-            name="Files",
-            diff=KeySetDiff.from_sets(set(lfs), set(rfs)),
-            parent=self.parent_node,
+        files_node = self.parent_node.add_child(
+            DiffTreeNode(
+                name="Files",
+                diff=KeySetDiff.from_sets(set(lfs), set(rfs)),
+            )
         )
         for shared_file in files_node.diff.shared:
             if shared_file.endswith(".sqlite"):

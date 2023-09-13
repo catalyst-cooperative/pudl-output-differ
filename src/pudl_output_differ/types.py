@@ -32,6 +32,12 @@ class DiffTreeNode(BaseModel):
         name_components.reverse()
         return delimiter.join(name_components)
     
+    def add_child(self, child: "DiffTreeNode") -> "DiffTreeNode":
+        """Appends node as a child and returns it."""
+        self.children.append(child)
+        child.parent = self
+        return child
+    
     def has_diff(self) -> bool:
         """Returns true if the diff is non-empty."""
         return self.diff is not None and self.diff.has_diff()

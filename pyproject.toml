@@ -11,6 +11,8 @@ python = "^3.10"
 pydantic = "^2.3.0"
 fsspec = "^2023.9.0"
 sqlalchemy = "^2.0.20"
+pandas = "^2.1.0"
+pydantic-settings = "^2.0.3"
 
 
 [build-system]
