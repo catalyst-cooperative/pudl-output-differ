@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field
 class GenericDiff(Protocol):
     """Interface for classes implementing diff."""
 
-
     def has_diff(self) -> bool:
         """Returns true if the diff is non-empty."""
 
