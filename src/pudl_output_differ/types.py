@@ -1,8 +1,10 @@
 """Generic types used in output diffing."""
-from queue import Queue
+from asyncio import FIRST_COMPLETED
+import threading
 from typing import Iterator, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
+import concurrent.futures
 
 
 @runtime_checkable
@@ -20,6 +22,7 @@ class DiffTreeNode(BaseModel):
     parent: Optional["DiffTreeNode"] = None
     diff: Optional[GenericDiff] = None
     children: list["DiffTreeNode"] = []
+    lock: threading.Lock = Field(exclude=True, default_factory=threading.Lock)
 
     def get_full_name(self, delimiter="/") -> str:
         """Returns concatenated full path of the node."""
@@ -33,8 +36,9 @@ class DiffTreeNode(BaseModel):
     
     def add_child(self, child: "DiffTreeNode") -> "DiffTreeNode":
         """Appends node as a child and returns it."""
-        self.children.append(child)
-        child.parent = self
+        with self.lock and child.lock:
+            self.children.append(child)
+            child.parent = self
         return child
     
     def has_diff(self) -> bool:
@@ -48,6 +52,37 @@ class DiffTreeNode(BaseModel):
         return f"{self.get_full_name()}:\n{self.diff}"
     
 
+class TaskQueue:
+    """Thread pool backed executor for diff evaluation."""
+    def __init__(self, max_workers: int = 4):
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        self.lock = threading.Lock()
+        self.futures: list[concurrent.futures.Future] = []
+        self.completed: list[concurrent.futures.Future] = []
+
+    def put(self, evaluator: "DiffEvaluator"):
+        """Add evaluator to the execution queue."""
+        with self.lock:
+            self.futures.append(self.executor.submit(evaluator.execute, self))
+
+    def get_diffs(self) -> Iterator[DiffTreeNode]:
+        """Retrieves diffs as soon as they're available."""
+        while self.futures:
+            done, _ = concurrent.futures.wait(self.futures, return_when=FIRST_COMPLETED)
+            for diff_future in done:
+                with self.lock:
+                    self.futures.remove(diff_future)
+                    self.completed.append(diff_future)
+                for diff in diff_future.result():
+                    yield diff
+            
+    def wait(self):
+        """Waits until all tasks are done."""
+        concurrent.futures.wait(self.futures)
+        with self.lock:
+            self.completed = self.futures
+            self.futures = []
+
 @runtime_checkable
 class DiffEvaluator(Protocol):
     """Interface for classes implementing diff evaluation.
@@ -56,35 +91,12 @@ class DiffEvaluator(Protocol):
     to run the evaluation.
     """
 
-    def execute(task_queue: Queue["DiffEvaluator"]) -> Iterator[DiffTreeNode]:
+    def execute(task_queue: TaskQueue) -> list[DiffTreeNode]:
         """Runs the evaulation.
         
         This is expected to generate list of diffs found at this level and push
         lower level evaluations into the task_queue.
         """
-
-class DiffEvaluatorBase(BaseModel):
-    """Base class for diff evaluators."""
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    parent_node: DiffTreeNode
-
-
-class DiffTreeExecutor(BaseModel):
-    """Holds the diff tree and executes the evaluation."""
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    root_node: DiffTreeNode = DiffTreeNode(name="Root")
-    task_queue: Queue[DiffEvaluator] = Field(exclude=True, default_factory=Queue)
-    has_diff: bool = False
-
-    def evaluate_and_print(self) -> bool:
-        """Runs tree evaluation and prints the diffs continuously."""
-        while self.task_queue.qsize() > 0:
-            evaluator = self.task_queue.get_nowait()
-            for diff in evaluator.execute(self.task_queue):
-                if diff.has_diff():
-                    self.has_diff = True
-                    print(diff)
 
 
 class KeySetDiff(BaseModel):
@@ -117,3 +129,8 @@ class KeySetDiff(BaseModel):
             right_only=right_only,
             shared=shared
         )
+
+class DiffEvaluatorBase(BaseModel):
+    """Base class for diff evaluators."""
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    parent_node: DiffTreeNode

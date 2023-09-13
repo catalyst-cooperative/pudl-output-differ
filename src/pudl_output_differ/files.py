@@ -1,15 +1,13 @@
 """Generic utilities for diffing PUDL_OUTPUT directories."""
 
 from pathlib import Path
-from queue import Queue
-from typing import Iterator
 import logging
 
 import fsspec
 from pudl_output_differ.sqlite import SQLiteDBEvaluator
 
 from pudl_output_differ.types import (
-    DiffEvaluator, DiffEvaluatorBase, DiffTreeNode, KeySetDiff
+    DiffEvaluatorBase, DiffTreeNode, KeySetDiff, TaskQueue
 )
 
 logger = logging.getLogger(__name__)
@@ -50,7 +48,7 @@ class OutputDirectoryEvaluator(DiffEvaluatorBase):
         return lp.as_posix()
 
     # TODO(rousik): passing parents this way is a bit clunky, but acceptable.
-    def execute(self, task_queue: Queue[DiffEvaluator]) -> Iterator[DiffTreeNode]:
+    def execute(self, task_queue: TaskQueue) -> list[DiffTreeNode]:
         """Computes diff between two output directories.
 
         Files on the left and right are compared for presence, children
@@ -81,4 +79,4 @@ class OutputDirectoryEvaluator(DiffEvaluatorBase):
                         parent_node = files_node,
                     )
                 )
-        yield files_node
+        return [files_node]

@@ -1,14 +1,13 @@
 """Utilities for comparing sqlite databases."""
 
 from queue import Queue
-from typing import Iterator
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings
 
 import sqlalchemy as sa
 from pudl_output_differ.types import (
-    DiffEvaluator, DiffEvaluatorBase, DiffTreeNode, KeySetDiff
+    DiffEvaluator, DiffEvaluatorBase, DiffTreeNode, KeySetDiff, TaskQueue
 )
 
 class SQLiteEvaluationSettings(BaseSettings):
@@ -34,8 +33,9 @@ class SQLiteDBEvaluator(DiffEvaluatorBase):
             ]
         return out
 
-    def execute(self, task_queue: Queue[DiffEvaluator]) -> Iterator[DiffTreeNode]:
+    def execute(self, task_queue: TaskQueue) -> list[DiffTreeNode]:
         """Analyze tables and their schemas."""
+        diffs = []
         left_engine = sa.create_engine(f"sqlite:///{self.left_db_path}")
         right_engine = sa.create_engine(f"sqlite:///{self.right_db_path}")
 
@@ -46,14 +46,14 @@ class SQLiteDBEvaluator(DiffEvaluatorBase):
         db_node = self.parent_node.add_child(
             DiffTreeNode(name=f"SQLiteDB({self.db_name})")
         )
-        yield db_node
+        diffs.append(db_node)
 
         # Tables are compared by name.
         tables = db_node.add_child(DiffTreeNode(
             name="Tables",
             diff=KeySetDiff.from_sets(set(lschema), set(rschema)),
         ))
-        yield tables
+        diffs.append(tables)
 
         left_connection = left_engine.connect()
         right_connection = right_engine.connect()
@@ -64,7 +64,7 @@ class SQLiteDBEvaluator(DiffEvaluatorBase):
                 parent=table_node,
                 diff=KeySetDiff.from_sets(lschema[table_name], rschema[table_name]),
             )
-            yield columns_node
+            diffs.append(columns_node)
             # TODO(rousik): perhaps we might want to do row comparisons even
             # if the schemas differ?
             if not columns_node.diff.has_diff():
@@ -76,6 +76,7 @@ class SQLiteDBEvaluator(DiffEvaluatorBase):
                         right_connection=right_connection,
                     )
                 )
+        return diffs
 
 class RowCountDiff(BaseModel):
     left_rows: int
@@ -123,8 +124,9 @@ class RowEvaluator(DiffEvaluatorBase):
     left_connection: sa.engine.Connection = Field(exclude=True)
     right_connection: sa.engine.Connection = Field(exclude=True)
 
-    def execute(self, task_queue: Queue[DiffEvaluator]) -> Iterator[DiffTreeNode]:
+    def execute(self, task_queue: Queue[DiffEvaluator]) -> list[DiffTreeNode]:
         """Analyze rows of a given table."""
+        diffs = []
         
         if SQLiteEvaluationSettings().count_rows:
             lrows = self.left_connection.execute(
@@ -133,12 +135,12 @@ class RowEvaluator(DiffEvaluatorBase):
             rrows = self.right_connection.execute(
                 sa.text(f"SELECT COUNT(*) FROM {self.table_name}")
             ).scalar()
-            yield self.parent_node.add_child(
+            diffs.append(self.parent_node.add_child(
                 DiffTreeNode(
                     name="RowCount",
                     diff=RowCountDiff(left_rows=lrows, right_rows=rrows),
                 )
-            )
+            ))
 
             if lrows != rrows and SQLiteEvaluationSettings().compare_rows:
                 ldf = pd.read_sql_table(self.table_name, self.left_connection)
@@ -146,7 +148,7 @@ class RowEvaluator(DiffEvaluatorBase):
                 merged = ldf.merge(rdf, how="outer", indicator=True)
                 lo = merged[merged["_merge"] == "left_only"]
                 ro = merged[merged["_merge"] == "right_only"]
-                yield self.parent_node.add_child(
+                diffs.append(self.parent_node.add_child(
                     DiffTreeNode(
                         name="RowsFullComparison",
                         diff=RowSampleDiff(
@@ -156,4 +158,5 @@ class RowEvaluator(DiffEvaluatorBase):
                             right_total_count=len(ro),
                         )
                     )
-                )
+                ))
+        return diffs

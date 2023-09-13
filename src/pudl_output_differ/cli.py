@@ -13,7 +13,7 @@ import sys
 import tempfile
 
 from pudl_output_differ.files import OutputDirectoryEvaluator
-from pudl_output_differ.types import DiffTreeExecutor
+from pudl_output_differ.types import DiffTreeNode, TaskQueue
 
 
 def parse_command_line(argv) -> argparse.Namespace:
@@ -33,6 +33,10 @@ def parse_command_line(argv) -> argparse.Namespace:
     parser.add_argument(
         "--cache-into", type=str, help="Directory where remote files should be cached."
     )
+    parser.add_argument(
+        "--max-workers", type=int, default=4, 
+        help="Number of worker threads to use."
+    )
     arguments = parser.parse_args(argv[1:])
     return arguments
 
@@ -40,20 +44,25 @@ def parse_command_line(argv) -> argparse.Namespace:
 def main() -> int:
     """Run differ on two directories."""
     args = parse_command_line(sys.argv)
-    exe = DiffTreeExecutor()
 
     cache_path = args.cache_into
     if not args.cache_into:
         cache_path = tempfile.mkdtemp()
 
-    exe.task_queue.put(OutputDirectoryEvaluator(
-        parent_node=exe.root_node,
+    task_queue = TaskQueue(max_workers=args.max_workers)
+    task_queue.put(OutputDirectoryEvaluator(
+        parent_node=DiffTreeNode(name="Root"),
         left_path=args.left,
         right_path=args.right,
         local_cache_root=cache_path,
     ))
-    exe.evaluate_and_print()
-    if exe.has_diff:
+    has_diff = False
+    for diff in task_queue.get_diffs():
+        if diff.has_diff():
+            has_diff = True
+            print(diff)
+
+    if has_diff:
         return 1
     return 0
 
