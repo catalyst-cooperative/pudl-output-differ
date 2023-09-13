@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "pudl-output-differ"
+version = "0.1.0"
+description = ""
+authors = ["Jan Rous <rousik@gmail.com>"]
+readme = "README.md"
+packages = [{include = "pudl_output_differ", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pydantic = "^2.3.0"
+fsspec = "^2023.9.0"
+sqlalchemy = "^2.0.20"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
