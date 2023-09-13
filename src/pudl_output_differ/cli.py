@@ -29,40 +29,12 @@ def parse_command_line(argv) -> argparse.Namespace:
         "left", type=str, help="path containing left side of outputs.")
     parser.add_argument(
         "right", type=str, help="path containing right side of outputs.")
-    parser.add_argument(
-        "--logfile",
-        default=None,
-        type=str,
-        help="If specified, write logs to this file.",
-    )
-    # parser.add_argument(
-    #     "--gcs_project_name",
-    #     default="catalyst-cooperative-pudl",
-    #     type=str,
-    #     help="GCS project to use when accessing storage buckets.",
-    # )
-    # parser.add_argument(
-    #     "--filetypes",
-    #     nargs="*",
-    #     default=["sqlite"],  # TODO(rousik): add support for json and others
-    # )
-    parser.add_argument(
-        "--loglevel",
-        help="Set logging level (DEBUG, INFO, WARNING, ERROR, or CRITICAL).",
-        default="INFO",
-    )
-    # TODO(janrous): perhaps rework the following comparison depth arguments.
-    # parser.add_argument(
-    #     "--compare-sqlite",
-    #     type=bool,
-    #     default=False,
-    # )
     arguments = parser.parse_args(argv[1:])
     return arguments
 
 
 def main() -> int:
-    """Clone the FERC Form 1 FoxPro database into SQLite."""
+    """Run differ on two directories."""
     args = parse_command_line(sys.argv)
     exe = DiffTreeExecutor()
     exe.task_queue.put(OutputDirectoryEvaluator(
