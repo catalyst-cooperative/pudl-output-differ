@@ -7,7 +7,9 @@ from typing import Iterator
 import fsspec
 from pudl_output_differ.sqlite import SQLiteDBEvaluator
 
-from pudl_output_differ.types import DiffEvaluator, DiffEvaluatorBase, DiffTreeNode, KeySetDiff
+from pudl_output_differ.types import (
+    DiffEvaluator, DiffEvaluatorBase, DiffTreeNode, KeySetDiff
+)
 
 
 class OutputDirectoryEvaluator(DiffEvaluatorBase):
