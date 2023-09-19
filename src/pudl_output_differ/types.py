@@ -1,10 +1,14 @@
 """Generic types used in output diffing."""
 from asyncio import FIRST_COMPLETED
+import logging
 import threading
 from typing import Iterator, Optional, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 import concurrent.futures
+
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -14,6 +18,7 @@ class GenericDiff(Protocol):
     def has_diff(self) -> bool:
         """Returns true if the diff is non-empty."""
 
+
 class DiffTreeNode(BaseModel):
     """Represents a node in the structure diff tree."""
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -22,7 +27,13 @@ class DiffTreeNode(BaseModel):
     parent: Optional["DiffTreeNode"] = None
     diff: Optional[GenericDiff] = None
     children: list["DiffTreeNode"] = []
-    lock: threading.Lock = Field(exclude=True, default_factory=threading.Lock)
+    _lock: threading.Lock
+    # _lock: threading.Lock = Field(exclude=True, default_factory=threading.Lock)
+
+    def __init__(self, **data):
+        """Initializes the node and instantiates the lock."""
+        super().__init__(**data)
+        self._lock = threading.Lock()
 
     def get_full_name(self, delimiter="/") -> str:
         """Returns concatenated full path of the node."""
@@ -36,7 +47,7 @@ class DiffTreeNode(BaseModel):
     
     def add_child(self, child: "DiffTreeNode") -> "DiffTreeNode":
         """Appends node as a child and returns it."""
-        with self.lock and child.lock:
+        with self._lock and child._lock:
             self.children.append(child)
             child.parent = self
         return child
@@ -56,21 +67,26 @@ class TaskQueue:
     """Thread pool backed executor for diff evaluation."""
     def __init__(self, max_workers: int = 4):
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-        self.lock = threading.Lock()
+        self._lock = threading.Lock()
         self.futures: list[concurrent.futures.Future] = []
         self.completed: list[concurrent.futures.Future] = []
 
     def put(self, evaluator: "DiffEvaluator"):
         """Add evaluator to the execution queue."""
-        with self.lock:
-            self.futures.append(self.executor.submit(evaluator.execute, self))
+        with self._lock:
+            def exec_evaluator(s):
+                logger.info(f"Executing {evaluator.__class__.__name__}")
+                return evaluator.execute(s)
+            fut = self.executor.submit(exec_evaluator, self)
+            self.futures.append(fut)            
+            #self.futures.append(self.executor.submit(evaluator.execute, self))
 
     def get_diffs(self) -> Iterator[DiffTreeNode]:
         """Retrieves diffs as soon as they're available."""
         while self.futures:
             done, _ = concurrent.futures.wait(self.futures, return_when=FIRST_COMPLETED)
             for diff_future in done:
-                with self.lock:
+                with self._lock:
                     self.futures.remove(diff_future)
                     self.completed.append(diff_future)
                 for diff in diff_future.result():
@@ -79,9 +95,10 @@ class TaskQueue:
     def wait(self):
         """Waits until all tasks are done."""
         concurrent.futures.wait(self.futures)
-        with self.lock:
+        with self._lock:
             self.completed = self.futures
             self.futures = []
+
 
 @runtime_checkable
 class DiffEvaluator(Protocol):

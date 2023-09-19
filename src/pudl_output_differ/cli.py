@@ -9,6 +9,7 @@ For SQLite databases, it will compare the tables, schemas and individual rows.
 For other files, file checksums are calculated and compared instead.
 """
 import argparse
+import logging
 import sys
 import tempfile
 
@@ -34,6 +35,11 @@ def parse_command_line(argv) -> argparse.Namespace:
         "--cache-into", type=str, help="Directory where remote files should be cached."
     )
     parser.add_argument(
+        "--filename-filter",
+        type=str, default="",
+        help="If specified, only look at files that match this regex filter."
+    )
+    parser.add_argument(
         "--max-workers", type=int, default=4, 
         help="Number of worker threads to use."
     )
@@ -49,11 +55,13 @@ def main() -> int:
     if not args.cache_into:
         cache_path = tempfile.mkdtemp()
 
+    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
     task_queue = TaskQueue(max_workers=args.max_workers)
     task_queue.put(OutputDirectoryEvaluator(
         parent_node=DiffTreeNode(name="Root"),
         left_path=args.left,
         right_path=args.right,
+        filename_filter=args.filename_filter,
         local_cache_root=cache_path,
     ))
     has_diff = False

@@ -2,8 +2,10 @@
 
 from pathlib import Path
 import logging
+import re
 
 import fsspec
+from pudl_output_differ.parquet import ParquetEvaluator
 from pudl_output_differ.sqlite import SQLiteDBEvaluator
 
 from pudl_output_differ.types import (
@@ -18,6 +20,7 @@ class OutputDirectoryEvaluator(DiffEvaluatorBase):
     left_path: str
     right_path: str
     local_cache_root: str
+    filename_filter: str = ""
 
     def get_files(self, root_path: str) -> dict[str, str]:
         """Returns list of files in the output directory.
@@ -31,10 +34,15 @@ class OutputDirectoryEvaluator(DiffEvaluatorBase):
 
         # FIXME(rousik): glob doesn't actually do recursive search here,
         # at least not for local files.
-        fs, fs_base_path = fsspec.core.url_to_fs(root_path)
-        for fpath in fs.glob(f"{fs_base_path}/**"):
+        fs, fs_base_path = fsspec.core.url_to_fs(root_path)        
+        for fpath in fs.glob(fs_base_path + "/**"):
             rel_path = Path(fpath).relative_to(fs_base_path).as_posix()
+            if self.filename_filter:
+                if not re.match(self.filename_filter, rel_path):
+                    continue
             out[rel_path] = fs.unstrip_protocol(fpath)
+        logger.info(f"Found {len(out)} files in {root_path}.")
+        logger.info(f"These are: {out}")
         return out
 
     def maybe_cache_remote(self, url: str, local_path: str) -> str:
@@ -77,6 +85,14 @@ class OutputDirectoryEvaluator(DiffEvaluatorBase):
                         left_db_path=left_path,
                         right_db_path=right_path,
                         parent_node = files_node,
+                    )
+                )
+            elif shared_file.endswith(".parquet"):
+                task_queue.put(
+                    ParquetEvaluator(
+                        left_path=lfs[shared_file],
+                        right_path=rfs[shared_file],
+                        parent_node=files_node,
                     )
                 )
         return [files_node]
