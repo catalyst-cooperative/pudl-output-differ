@@ -3,6 +3,7 @@
 from pathlib import Path
 import logging
 import re
+from opentelemetry import trace
 
 import fsspec
 from pudl_output_differ.parquet import ParquetEvaluator
@@ -13,6 +14,7 @@ from pudl_output_differ.types import (
 )
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 class OutputDirectoryEvaluator(DiffEvaluatorBase):
@@ -56,12 +58,16 @@ class OutputDirectoryEvaluator(DiffEvaluatorBase):
         return lp.as_posix()
 
     # TODO(rousik): passing parents this way is a bit clunky, but acceptable.
+    @tracer.start_as_current_span(name="OutputDirectoryEvaluator.execute")
     def execute(self, task_queue: TaskQueue) -> list[DiffTreeNode]:
         """Computes diff between two output directories.
 
         Files on the left and right are compared for presence, children
         are deeper-layer analyzers for specific file types that are supported.
         """
+        sp = tracer.get_current_span()
+        sp.set_attribute("left_path", self.left_path)
+        sp.set_attribute("right_path", self.right_path)
         lfs = self.get_files(self.left_path)
         rfs = self.get_files(self.right_path)
 

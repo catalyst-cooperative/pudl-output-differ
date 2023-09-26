@@ -16,6 +16,12 @@ import tempfile
 from pudl_output_differ.files import OutputDirectoryEvaluator
 from pudl_output_differ.types import DiffTreeNode, TaskQueue
 
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import (
+   BatchSpanProcessor,
+   ConsoleSpanExporter,
+)
 
 def parse_command_line(argv) -> argparse.Namespace:
     """Parse command line arguments. See the -h option.
@@ -50,12 +56,19 @@ def parse_command_line(argv) -> argparse.Namespace:
 def main() -> int:
     """Run differ on two directories."""
     args = parse_command_line(sys.argv)
+    
+    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+
+    provider = TracerProvider()
+    # TODO(rousik): add support for other trace backends.
+    processor = BatchSpanProcessor(ConsoleSpanExporter())
+    provider.add_span_processor(processor)
+    trace.set_tracer_provider(provider)
 
     cache_path = args.cache_into
     if not args.cache_into:
         cache_path = tempfile.mkdtemp()
 
-    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
     task_queue = TaskQueue(max_workers=args.max_workers)
     task_queue.put(OutputDirectoryEvaluator(
         parent_node=DiffTreeNode(name="Root"),

@@ -4,11 +4,16 @@ from queue import Queue
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings
+from opentelemetry import trace
 
 import sqlalchemy as sa
 from pudl_output_differ.types import (
     DiffEvaluator, DiffEvaluatorBase, DiffTreeNode, KeySetDiff, TaskQueue
 )
+
+
+tracer = trace.get_tracer(__name__)
+
 
 class SQLiteEvaluationSettings(BaseSettings):
     """Holds settings for SQLite evaluation."""
@@ -33,8 +38,15 @@ class SQLiteDBEvaluator(DiffEvaluatorBase):
             ]
         return out
 
+    
+    @tracer.start_as_current_span(name="SQLiteDBEvaluator.execute")
     def execute(self, task_queue: TaskQueue) -> list[DiffTreeNode]:
         """Analyze tables and their schemas."""
+        sp = tracer.get_current_span()
+        sp.set_attribute("db_name", self.db_name)
+        sp.set_attribute("left_db_path", self.left_db_path)
+        sp.set_attribute("right_db_path", self.right_db_path)
+
         diffs = []
         left_engine = sa.create_engine(f"sqlite:///{self.left_db_path}")
         right_engine = sa.create_engine(f"sqlite:///{self.right_db_path}")
@@ -71,6 +83,7 @@ class SQLiteDBEvaluator(DiffEvaluatorBase):
                 task_queue.put(
                     RowEvaluator(
                         parent_node=table_node,
+                        db_name=self.db_name,
                         table_name=table_name,
                         left_connection=left_connection,
                         right_connection=right_connection,
@@ -120,12 +133,17 @@ class RowSampleDiff(BaseModel):
 
 
 class RowEvaluator(DiffEvaluatorBase):
+    db_name: str
     table_name: str
     left_connection: sa.engine.Connection = Field(exclude=True)
     right_connection: sa.engine.Connection = Field(exclude=True)
 
+    @tracer.start_as_current_span(name="SQLite.RowEvaluator.execute")
     def execute(self, task_queue: Queue[DiffEvaluator]) -> list[DiffTreeNode]:
         """Analyze rows of a given table."""
+        sp = tracer.get_current_span()
+        sp.set_attribute("db_name", self.db_name)
+        sp.set_attribute("table_name", self.table_name)
         diffs = []
         
         if SQLiteEvaluationSettings().count_rows:
