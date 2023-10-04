@@ -17,6 +17,7 @@ gcsfs = "^2023.9.0"
 pyarrow = "^13.0.0"
 opentelemetry-api = "^1.20.0"
 opentelemetry-sdk = "^1.20.0"
+apsw = "^3.43.1.0"
 
 
 [build-system]

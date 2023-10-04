@@ -74,10 +74,7 @@ class TaskQueue:
     def put(self, evaluator: "DiffEvaluator"):
         """Add evaluator to the execution queue."""
         with self._lock:
-            def exec_evaluator(s):
-                logger.info(f"Executing {evaluator.__class__.__name__}")
-                return evaluator.execute(s)
-            fut = self.executor.submit(exec_evaluator, self)
+            fut = self.executor.submit(evaluator.execute, self)
             self.futures.append(fut)            
             #self.futures.append(self.executor.submit(evaluator.execute, self))
 

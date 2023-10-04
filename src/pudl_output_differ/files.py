@@ -43,19 +43,8 @@ class OutputDirectoryEvaluator(DiffEvaluatorBase):
                 if not re.match(self.filename_filter, rel_path):
                     continue
             out[rel_path] = fs.unstrip_protocol(fpath)
-        logger.info(f"Found {len(out)} files in {root_path}.")
-        logger.info(f"These are: {out}")
+        logger.debug(f"Found {len(out)} files in {root_path}.")
         return out
-
-    def maybe_cache_remote(self, url: str, local_path: str) -> str:
-        """Downloads remote file to local cache."""
-        fs, fs_path = fsspec.core.url_to_fs(url)
-        if fs.protocol == "file":
-            return fs_path
-        lp = Path(self.local_cache_root) / local_path
-        logger.warn(f"Need to cache remote file {url} to {lp}.")
-        fs.get(fs_path, lp.as_posix())
-        return lp.as_posix()
 
     # TODO(rousik): passing parents this way is a bit clunky, but acceptable.
     @tracer.start_as_current_span(name="OutputDirectoryEvaluator.execute")
@@ -65,7 +54,7 @@ class OutputDirectoryEvaluator(DiffEvaluatorBase):
         Files on the left and right are compared for presence, children
         are deeper-layer analyzers for specific file types that are supported.
         """
-        sp = tracer.get_current_span()
+        sp = trace.get_current_span()
         sp.set_attribute("left_path", self.left_path)
         sp.set_attribute("right_path", self.right_path)
         lfs = self.get_files(self.left_path)
@@ -79,17 +68,11 @@ class OutputDirectoryEvaluator(DiffEvaluatorBase):
         )
         for shared_file in files_node.diff.shared:
             if shared_file.endswith(".sqlite"):
-                # Download remote files to local cache 
-                left_path = self.maybe_cache_remote(
-                    lfs[shared_file], f"left/{shared_file}")
-                right_path = self.maybe_cache_remote(
-                    rfs[shared_file], f"right/{shared_file}")
-
                 task_queue.put(
                     SQLiteDBEvaluator(
                         db_name=shared_file,
-                        left_db_path=left_path,
-                        right_db_path=right_path,
+                        left_db_path=lfs[shared_file],
+                        right_db_path=rfs[shared_file],
                         parent_node = files_node,
                     )
                 )

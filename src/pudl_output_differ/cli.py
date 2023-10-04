@@ -16,12 +16,6 @@ import tempfile
 from pudl_output_differ.files import OutputDirectoryEvaluator
 from pudl_output_differ.types import DiffTreeNode, TaskQueue
 
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import (
-   BatchSpanProcessor,
-   ConsoleSpanExporter,
-)
 
 def parse_command_line(argv) -> argparse.Namespace:
     """Parse command line arguments. See the -h option.
@@ -49,6 +43,11 @@ def parse_command_line(argv) -> argparse.Namespace:
         "--max-workers", type=int, default=4, 
         help="Number of worker threads to use."
     )
+    parser.add_argument(
+        "--trace-backend-otel",
+        default="http://localhost:4317",
+        help="Address of the OTEL compatible trace backend."
+    )
     arguments = parser.parse_args(argv[1:])
     return arguments
 
@@ -57,13 +56,13 @@ def main() -> int:
     """Run differ on two directories."""
     args = parse_command_line(sys.argv)
     
-    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
-    provider = TracerProvider()
+    # provider = TracerProvider()
     # TODO(rousik): add support for other trace backends.
-    processor = BatchSpanProcessor(ConsoleSpanExporter())
-    provider.add_span_processor(processor)
-    trace.set_tracer_provider(provider)
+    # processor = BatchSpanProcessor(ConsoleSpanExporter())
+    # provider.add_span_processor(processor)
+    # trace.set_tracer_provider(provider)
 
     cache_path = args.cache_into
     if not args.cache_into:

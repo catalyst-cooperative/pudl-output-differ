@@ -1,24 +1,27 @@
 """Utilities for comparing sqlite databases."""
 
+import logging
+import apsw
 from queue import Queue
+import fsspec
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings
 from opentelemetry import trace
 
-import sqlalchemy as sa
+from pudl_output_differ.gcs_vfs import FSSpecVFS
 from pudl_output_differ.types import (
     DiffEvaluator, DiffEvaluatorBase, DiffTreeNode, KeySetDiff, TaskQueue
 )
 
-
+logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
 
 class SQLiteEvaluationSettings(BaseSettings):
     """Holds settings for SQLite evaluation."""
-    count_rows: bool = True
-    compare_rows: bool = True
+    count_rows: bool = False
+    compare_rows: bool = False
     unique_rows_sample: int = 5
 
 
@@ -27,32 +30,53 @@ class SQLiteDBEvaluator(DiffEvaluatorBase):
     left_db_path: str
     right_db_path: str
 
-    def get_table_schemas(self, engine: sa.engine.Engine) -> dict[str, set[str]]:
+    def get_table_schemas(self, db: apsw.Connection) -> dict[str, set[str]]:
         """Returns dictionary of table schemas."""
         out = {}
-        inspector = sa.inspect(engine)
-        for table_name in inspector.get_table_names():
+        for table_name in [r[1] for r in db.pragma("table_list")]:
+            # TODO(rousik): we might want to consider skipping special tables such
+            # as alembic table and so on.
+            tb_info = db.pragma(f"table_info({table_name})")
+            if isinstance(tb_info, tuple):
+                # It's unclear why pragma returns tuple when there's only
+                # single row. This is a stupid workaround but what can
+                # we do here.
+                tb_info = [tb_info]
             out[table_name] = [
-                "::".join([col["name"], str(col["type"])])
-                for col in inspector.get_columns(table_name)
+                "::".join([col[1], col[2]])
+                for col in tb_info
             ]
         return out
-
     
+    def connect_db(self, fullpath: str) -> apsw.Connection:
+        """Connect sqlite database, perhaps using custom VFS."""
+        fs, path = fsspec.core.url_to_fs(fullpath)
+        open_flags = apsw.SQLITE_OPEN_READONLY | apsw.SQLITE_OPEN_URI
+        if "gcs" in fs.protocol:
+            vfs_instance = FSSpecVFS(fs)
+            return apsw.Connection(
+                f"file:/{path}?immutable=1",
+                flags=open_flags,
+                vfs=vfs_instance.vfs_name,
+            )
+        if fs.protocol == "file":
+            return apsw.Connection(f"file:{path}", flags=open_flags)
+        raise ValueError(f"Unsupported protocol {fs.protocol}")
+ 
     @tracer.start_as_current_span(name="SQLiteDBEvaluator.execute")
     def execute(self, task_queue: TaskQueue) -> list[DiffTreeNode]:
         """Analyze tables and their schemas."""
-        sp = tracer.get_current_span()
+        sp = trace.get_current_span()
         sp.set_attribute("db_name", self.db_name)
         sp.set_attribute("left_db_path", self.left_db_path)
         sp.set_attribute("right_db_path", self.right_db_path)
 
         diffs = []
-        left_engine = sa.create_engine(f"sqlite:///{self.left_db_path}")
-        right_engine = sa.create_engine(f"sqlite:///{self.right_db_path}")
-
-        lschema = self.get_table_schemas(left_engine)
-        rschema = self.get_table_schemas(right_engine)
+        ldb = self.connect_db(self.left_db_path)
+        rdb = self.connect_db(self.right_db_path)
+        
+        lschema = self.get_table_schemas(ldb)
+        rschema = self.get_table_schemas(rdb)
         
         # All database diffs will be children of this node.
         db_node = self.parent_node.add_child(
@@ -67,8 +91,6 @@ class SQLiteDBEvaluator(DiffEvaluatorBase):
         ))
         diffs.append(tables)
 
-        left_connection = left_engine.connect()
-        right_connection = right_engine.connect()
         for table_name in tables.diff.shared:
             table_node = DiffTreeNode(name=f"Table({table_name})", parent=tables)
             columns_node = DiffTreeNode(
@@ -85,8 +107,8 @@ class SQLiteDBEvaluator(DiffEvaluatorBase):
                         parent_node=table_node,
                         db_name=self.db_name,
                         table_name=table_name,
-                        left_connection=left_connection,
-                        right_connection=right_connection,
+                        left_connection=ldb,
+                        right_connection=rdb,
                     )
                 )
         return diffs
@@ -135,24 +157,27 @@ class RowSampleDiff(BaseModel):
 class RowEvaluator(DiffEvaluatorBase):
     db_name: str
     table_name: str
-    left_connection: sa.engine.Connection = Field(exclude=True)
-    right_connection: sa.engine.Connection = Field(exclude=True)
+    left_connection: apsw.Connection = Field(exclude=True)
+    right_connection: apsw.Connection = Field(exclude=True)
+
+    def _count_rows(self, conn: apsw.Connection) -> int:
+        """Returns number of rows in a table."""
+        total = 0
+        for r in conn.execute(f"SELECT COUNT(*) FROM {self.table_name}"):
+            total += int(r[0])
+        return total
 
     @tracer.start_as_current_span(name="SQLite.RowEvaluator.execute")
     def execute(self, task_queue: Queue[DiffEvaluator]) -> list[DiffTreeNode]:
         """Analyze rows of a given table."""
-        sp = tracer.get_current_span()
+        sp = trace.get_current_span()
         sp.set_attribute("db_name", self.db_name)
         sp.set_attribute("table_name", self.table_name)
         diffs = []
         
         if SQLiteEvaluationSettings().count_rows:
-            lrows = self.left_connection.execute(
-                sa.text(f"SELECT COUNT(*) FROM {self.table_name}")
-            ).scalar()
-            rrows = self.right_connection.execute(
-                sa.text(f"SELECT COUNT(*) FROM {self.table_name}")
-            ).scalar()
+            lrows = self._count_rows(self.left_connection)
+            rrows = self._count_rows(self.right_connection)
             diffs.append(self.parent_node.add_child(
                 DiffTreeNode(
                     name="RowCount",
