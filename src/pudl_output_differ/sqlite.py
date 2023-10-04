@@ -6,7 +6,7 @@ from queue import Queue
 import fsspec
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from opentelemetry import trace
 
 from pudl_output_differ.gcs_vfs import FSSpecVFS
@@ -20,6 +20,8 @@ tracer = trace.get_tracer(__name__)
 
 class SQLiteEvaluationSettings(BaseSettings):
     """Holds settings for SQLite evaluation."""
+    model_config = SettingsConfigDict(env_prefix='diff_')
+    
     count_rows: bool = False
     compare_rows: bool = False
     unique_rows_sample: int = 5
@@ -38,6 +40,7 @@ class SQLiteDBEvaluator(DiffEvaluatorBase):
             # as alembic table and so on.
             tb_info = db.pragma(f"table_info({table_name})")
             if isinstance(tb_info, tuple):
+                logger.warn(f"table_info for {table_name} is a tuple, not a list.")
                 # It's unclear why pragma returns tuple when there's only
                 # single row. This is a stupid workaround but what can
                 # we do here.
