@@ -1,0 +1,34 @@
+name: Compare PUDL outputs
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_path:
+        description: Remote path where baseline outputs are.
+        required: true
+      experiment_path:
+        description: Remote path where experiment outputs are.
+        required: true
+      compare_rows:
+        description: Compare row-level records.
+        type: boolean
+        default: false
+
+jobs:
+  compare-outputs:
+    runs-on: ubuntu-latest
+    # TODO(rousik): put env: here to configure row-comparisons.
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-python@v2
+        with:
+          python-version: 3.9
+      - uses: snok/install-poetry@v1
+        with:
+          version: 1.2.0
+      - name: Install dependencies
+         run: poetry install
+      - name: Run my script
+        run: |
+            poetry run python src/pudl_output_differ/cli.py \
+              ${{ inputs.baseline_path }} ${{ inputs.experiment_path }}
+
