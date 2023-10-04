@@ -6,5 +6,5 @@ COPY pyproject.toml poetry.lock ./
 COPY README.md .
 COPY src ./src
 RUN poetry config virtualenvs.create false
-RUN poetry install --no-dev
+RUN poetry install --only main
 ENTRYPOINT ["poetry", "run", "python", "-m", "pudl_output_differ.main"]
