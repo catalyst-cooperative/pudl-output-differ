@@ -1,16 +1,21 @@
 """Generic types used in output diffing."""
-from asyncio import FIRST_COMPLETED, ALL_COMPLETED
+from asyncio import ALL_COMPLETED
+from enum import IntEnum
 from functools import total_ordering
 from io import StringIO
 import logging
 import threading
-from typing import Iterator, Optional, Protocol, runtime_checkable
+import traceback
+from typing import Iterator, Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 import concurrent.futures
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+from opentelemetry import trace, context
 
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 @total_ordering
@@ -20,7 +25,7 @@ class TypeDef(BaseModel):
     This makes all Types orderable, first by name, then
     by the value of their field (processed in the alphabetical order).
     """
-    def __lt__(self, other) -> bool
+    def __lt__(self, other) -> bool:
         if self.__class__.__name__ != other.__class__.__name__:
             return self.__class__.__name__ < other.__class__.__name__
         self_model = self.model_dump()
@@ -36,12 +41,24 @@ class TypeDef(BaseModel):
         return False
 
 
+class ReportSeverity(IntEnum):
+    """Indicates the severity of a given report."""
+    WARNING = 1
+    ERROR = 2
+
+
+class ReportBlock(BaseModel):
+    """Represents single block of data that is part of the report."""
+    severity: ReportSeverity = ReportSeverity.ERROR
+    content: str = ""
+
+
 class AnalysisReport(BaseModel):
     """Holds the results of the analysis."""
     object_path: list[TypeDef]
     title: str = ""
     markdown: str = ""
-    # TODO(rousik): analysis should be associated with object_path. Uncleaer
+    # TODO(rousik): analysis should be associated with object_path. Unclear
     # whether this should be part of the report, or attached to the object
     # by the TaskQueue.
 
@@ -70,63 +87,10 @@ class GenericAnalyzer(BaseModel):
     """
     object_path: list[TypeDef]
 
-    def extend_path(self, child: TypeDef):
+    def extend_path(self, child: TypeDef) -> list[TypeDef]:
         """Returns object path extended by the `child`."""
         return self.object_path + [child]
 
-
-# class DiffTreeNode(BaseModel):
-#     """Represents a node in the structure diff tree."""
-#     model_config = ConfigDict(arbitrary_types_allowed=True)
-
-#     name: str
-#     parent: Optional["DiffTreeNode"] = None
-#     diff: Optional[GenericDiff] = None
-#     children: list["DiffTreeNode"] = []
-#     _lock: threading.Lock
-#     # _lock: threading.Lock = Field(exclude=True, default_factory=threading.Lock)
-
-#     def __init__(self, **data):
-#         """Initializes the node and instantiates the lock."""
-#         super().__init__(**data)
-#         self._lock = threading.Lock()
-
-#     def get_full_name(self, delimiter="/") -> str:
-#         """Returns concatenated full path of the node."""
-#         name_components = []
-#         node = self
-#         while node is not None:
-#             name_components.append(node.name)
-#             node = node.parent
-#         name_components.reverse()
-#         return delimiter.join(name_components)
-    
-#     def add_child(self, child: "DiffTreeNode") -> "DiffTreeNode":
-#         """Appends node as a child and returns it."""
-#         with self._lock and child._lock:
-#             self.children.append(child)
-#             child.parent = self
-#         return child
-    
-#     def has_diff(self, recursive=False) -> bool:
-#         """Returns true if the diff is non-empty.
-        
-#         Args:
-#             recursive: if True, look for diffs recursively in the subtree.
-#         """
-#         if self.diff is not None and self.diff.has_diff():
-#             return True
-#         if recursive:
-#             return any(c.has_diff(recursive=True) for c in self.children)
-#         return False
-    
-#     def __str__(self) -> str:
-#         """Returns human readable string represenation of the diff."""
-#         if not self.has_diff():
-#             return ""
-#         return f"{self.get_full_name()}:\n{self.diff}"
-    
-    
 
 class TaskQueue:
     """Thread pool backed executor for diff evaluation."""
@@ -137,54 +101,67 @@ class TaskQueue:
         # Perhaps put() method should indicate priority?
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         self._lock = threading.Lock()
-        self.futures: list[concurrent.futures.Future] = []
-        self.completed: list[concurrent.futures.Future] = []
-        self.finished = False
+        self.analyses: dict[concurrent.futures.Future, Analyzer] = {}
+        self.trace_carrier = {}
+        TraceContextTextMapPropagator().inject(self.trace_carrier)
 
     def put(self, analyzer: Analyzer):
         """Add evaluator to the execution queue."""
         with self._lock:
-            if self.finished:
-                raise RuntimeError("Can't add tasks to finished queue.")
             # TODO(rousik): here we should decide on how to handle
             # big tasks that need to be run in isolation, e.g. 
             # analyis of very large sql tables.
-            fut = self.executor.submit(analyzer.execute, self)
-            self.futures.append(fut)            
+            def traced_execute():
+                if self.trace_carrier:
+                    ctx = TraceContextTextMapPropagator().extract(carrier=self.trace_carrier)
+                    token = context.attach(ctx)
+                    try:
+                        return analyzer.execute(self)
+                    finally:
+                        context.detach(token)
+                else:
+                    return analyzer.execute(self)
 
-    def iter_analyses(self) -> Iterator[AnalysisReport]:
-        """Retrieves analyses as soon as they're available."""
-        while self.futures:
-            done, _ = concurrent.futures.wait(self.futures, return_when=FIRST_COMPLETED)
-            for analysis_future in done:
-                with self._lock:
-                    self.futures.remove(analysis_future)
-                    self.completed.append(analysis_future)
-                yield analysis_future.result()
-            
+            fut = self.executor.submit(traced_execute)
+            self.analyses[fut] = analyzer
+            # TODO(rousik): perhaps we can have a better way to associate
+            # reports with the analyzer metadata and other info.
+
+    def iter_analyses(self, catch_exceptions:bool=True) -> Iterator[AnalysisReport]:        
+        keys_seen = set()
+        while True:
+            remaining_futures = set(self.analyses.keys()).difference(keys_seen)
+            if not remaining_futures:
+                return
+            keys_seen.update(remaining_futures)
+            for fut in concurrent.futures.as_completed(remaining_futures):
+                analyzer = self.analyses[fut]
+                try:
+                    yield fut.result()
+                except Exception as e:
+                    str_path = "/".join(repr(p) for p in analyzer.object_path)
+                    error_title = f"{analyzer.__class__.__name__} failed on {str_path}"
+                    if not catch_exceptions:
+                        raise RuntimeError(error_title) from e
+                    # Otherwise, render exception as markdown.
+                    yield AnalysisReport(
+                        object_path=analyzer.object_path,
+                        title=f"## {error_title}",
+                        markdown=f"```\n{traceback.format_exc()}\n```",
+                    )
+     
     def wait(self):
         """Waits until all tasks are done."""
-        done, not_done = concurrent.futures.wait(self.futures, return_when=ALL_COMPLETED)
-        with self._lock:
-            if not_done:
-                raise RuntimeError("Not all tasks are completed.")
-            self.completed = done
-            self.futures = not_done
-            self.finished = True
+        concurrent.futures.wait(self.analyses.keys(), return_when=ALL_COMPLETED)
 
-    def get_analyses(self) -> list[AnalysisReport]:
+    def get_analyses(self, catch_exceptions:bool = True) -> list[AnalysisReport]:
         """Retrieve all analysis reports.
 
         This is expected to be called only after wait().
         
         """
-        with self._lock:
-            if not self.finished:
-                raise RuntimeError("Need to call wait() on the queue first.")
-            if self.futures:
-                raise RuntimeError("Not all tasks are completed.")
-            return [f.result() for f in self.completed]
-
+        self.wait()
+        return list(self.iter_analyses(catch_exceptions=catch_exceptions))
 
 class KeySetDiff(BaseModel):
     """Represents two-way diff between two sets of keys."""
@@ -200,16 +177,18 @@ class KeySetDiff(BaseModel):
         """Writes information about items in the `stuff` set."""
         if not stuff:
             return 
+        n = len(stuff)
         if long_format:
-            out.write(f"* {self.entity} {verb}:\n")
+            out.write(f"* {n} {self.entity} {verb}:\n")
             out.writelines([f"  * {k}\n" for k in sorted(stuff)])
         else:
-            out.write(f"* {self.entity} {verb}: {sorted(stuff)}\n")
+            out.write(f"* {n} {self.entity} {verb}: {sorted(stuff)}\n")
     
     def markdown(self, long_format: bool = False) -> str:
         out = StringIO()
         self.write_items(out, self.left_only, verb="removed", long_format=long_format)
         self.write_items(out, self.right_only, verb="added", long_format=long_format)
+        return out.getvalue()
     
     def has_diff(self):
         """Returns true if the diff is non-empty."""
@@ -226,6 +205,7 @@ class KeySetDiff(BaseModel):
         if keep_shared:
             shared = set(left).intersection(right)
         return KeySetDiff(
+            entity=entity,
             left_only=left_only,
             right_only=right_only,
             shared=shared

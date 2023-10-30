@@ -1,32 +1,30 @@
 """Utilities for comparing sqlite databases."""
 
+from io import StringIO
 import logging
 from typing import Any
-from queue import Queue
 import pandas as pd
 import sqlite3
-from pydantic import BaseModel, ConfigDict
 from opentelemetry import trace
+from sqlalchemy import Connection, create_engine
 
 from pudl_output_differ.types import (
-    AnalysisReport, DiffEvaluator, DiffEvaluatorBase, DiffTreeNode, GenericAnalyzer, KeySetDiff, TaskQueue, TypeDef
+    AnalysisReport, GenericAnalyzer, KeySetDiff, TaskQueue, TypeDef
 )
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
-
-# TODO(rousik): we need a single caching mechanism for 
-# all backends. Having this local to SQLiteAnalyzer seems
-# counter-intuitive.
 
 
 class Database(TypeDef):
     """Represents a database."""
     name: str
 
+
 class Table(TypeDef):
     """Represents a table in a database."""
     name: str
+
 
 class SQLiteAnalyzer(GenericAnalyzer):
     db_name: str
@@ -56,24 +54,26 @@ class SQLiteAnalyzer(GenericAnalyzer):
         tables_df = pd.read_sql_query("PRAGMA table_list", db)
         return set(tables_df[tables_df.schema == "main"]["name"])
 
-    @tracer.start_as_current_span(name="SQLiteDBEvaluator.execute")
-    def execute(self, task_queue: TaskQueue) -> list[DiffTreeNode]:
+    @tracer.start_as_current_span(name="SQLiteAnalyzer.execute")
+    def execute(self, task_queue: TaskQueue) -> AnalysisReport:
         """Analyze tables and their schemas."""
+        logger.debug(f"Starting analysis of a database {self.db_name}")
         sp = trace.get_current_span()
         sp.set_attribute("db_name", self.db_name)
+        ldb = sqlite3.connect(self.left_db_path)
+        rdb = sqlite3.connect(self.right_db_path)
 
-        ldb = sqlite3.connect("sqlite://{self.left_db_path}")
-        rdb = sqlite3.connect("sqlite://{self.right_db_path}")
-
+        ltables = self.list_tables(ldb)
+        rtables = self.list_tables(rdb)
         tables_diff = KeySetDiff.from_sets(
-            left=self.list_tables(ldb),
-            right=self.list_tables(rdb),
+            left=ltables,
+            right=rtables,
             entity="tables",
         )
-        for table_name in tables_diff.shared:
+        for table_name in sorted(tables_diff.shared):
             task_queue.put(
                 TableAnalyzer(
-                    object_path=self.exend_path(Table(name=table_name)),
+                    object_path=self.extend_path(Table(name=table_name)),
                     left_db_path=self.left_db_path,
                     right_db_path=self.right_db_path,
                     db_name=self.db_name,
@@ -93,233 +93,138 @@ class TableAnalyzer(GenericAnalyzer):
     right_db_path: str
     table_name: str
 
-    def get_columns(self, db: sqlite3.Connection, pk_only: bool = False) -> dict[str, str]:
+    def get_columns(self, db: Connection, pk_only: bool = False) -> dict[str, str]:
         """Returns dictionary with columns and their types."""
         ti_df = pd.read_sql_query(f"PRAGMA table_info({self.table_name})", db)
         if pk_only:
             ti_df = ti_df[ti_df.pk == 1]
         return {r["name"]: r["type"] for _, r in ti_df.iterrows()}        
 
-    @tracer.start_as_current_span(name="SQLiteDBEvaluator.execute")
+    @tracer.start_as_current_span(name="TableAnalyzer.execute")
     def execute(self, task_queue: TaskQueue) -> AnalysisReport:
         """Analyze tables and their schemas."""
+        logger.debug(f"Starting analysis of table {self.db_name}/{self.table_name}")
         # TODO(rousik): First, look for schema discrepancies.
-        ldb = sqlite3.connect(self.left_db_path)
-        rdb = sqlite3.connect(self.right_db_path)
+        logger.info(f"Opening db: {self.left_db_path}")
+        l_db_engine = create_engine(f"sqlite:///{self.left_db_path}")
+        r_db_engine = create_engine(f"sqlite:///{self.right_db_path}")
+
+        lconn = l_db_engine.connect()
+        rconn = r_db_engine.connect()
 
         # TODO(rousik): recover from runtime errors; if we can't handle it,
         # crashing future execution should be okay and the report should simply
         # be the exception.
-        l_pk = self.get_columns(ldb, pk_only=True)
-        r_pk = self.get_columns(rdb, pk_only=True)
+        l_pk = self.get_columns(lconn, pk_only=True)
+        r_pk = self.get_columns(rconn, pk_only=True)
+
 
         if l_pk != r_pk:
-            raise RuntimeError(f"Primary key columns differ for table {self.table_name}")
-        if not l_pk:
-            logger.warning(f"Table {self.table_name} has no primary key columns.")
+            raise RuntimeError(f"Primary key columns for {self.table_name} do not match.")
         if l_pk:
-            # Compare rows by primary key columns only.
-            cols_fetch = ", ".join(sorted(l_pk))
-
-            sql = f"SELECT {cols_fetch} FROM {self.table_name}",
-            l_df = pd.read_sql_query(sql, ldb)
-            r_df = pd.read_sql_query(sql, rdb)
-            merged = l_df.merge(r_df, how="outer", indicator=True)
-
-            # TODO(rousik): as a first pass, we will calculate the 
-            # magnitued of this change. Of N records x percent 
-            # were added/removed/modified.
-
-            # TODO(rousik): analyzing modifying files with pandas
-            # frame comparison assertion, but we will have to load
-            # all of those into memory.
-            # It's unclear what would be the most edffective way
-            # to load this.
+            logger.debug(f"{self.table_name}: primary columns: {','.join(sorted(l_pk))}")
+            return self.compare_pk_tables(lconn, rconn, sorted(l_pk))
+        logger.debug(f"{self.table_name}: no primary key columns, comparing all rows.")
+        return self.compare_raw_tables(lconn, rconn)
         
-
-        # TODO(rousik): Then figure out which rows were added/removed
-        # TODO(rousik): Then figure out which rows were modified, to
-        # do that, we need to do comparison using primary key columns,
-        # and compare the results.
-        # pandas.testing.assert_frame_equal() should be good tool to 
-        # compare records common in the two dataframes.
-        
-
-
-
-        lschema = self.get_table_schemas(ldb)
-        rschema = self.get_table_schemas(rdb)
-
-        
-
-        
-        # All database diffs will be children of this node.
-        db_node = self.parent_node.add_child(
-            DiffTreeNode(name=f"SQLiteDB({self.db_name})")
-        )
-        diffs.append(db_node)
-
-        # Tables are compared by name.
-        tables = db_node.add_child(DiffTreeNode(
-            name="Tables",
-            diff=KeySetDiff.from_sets(set(lschema), set(rschema)),
-        ))
-        diffs.append(tables)
-
-        for table_name in tables.diff.shared:
-            table_node = DiffTreeNode(name=f"Table({table_name})", parent=tables)
-
-            # For ease of use, let's collapse col_name => col_type lschema dict into
-            # string representations of columms
-            lcols = [":".join(it) for it in lschema[table_name].items()]
-            rcols = [":".join(it) for it in rschema[table_name].items()]
-            columns_node = DiffTreeNode(
-                name="Columns",
-                parent=table_node,
-                diff=KeySetDiff.from_sets(lcols, rcols)
-            )
-            diffs.append(columns_node)
-
-            # Figure out which columns share type and are present on both sides.
-            overlap_cols = [
-                col for col in lschema[table_name].keys()
-                if lschema[table_name][col] == rschema[table_name].get(col)
-            ]
-            if not columns_node.has_diff():
-                # TODO(rousik): Some strange ferc tables have "index" column which
-                # seems to break SQL for loading the stuff. We can probably work around
-                # this by using SQLAlchemy with read_sql_table(...).
-                # That would be a better choice anyways.
-                overlap_cols = ["*"]
-
-            if overlap_cols:
-                task_queue.put(
-                    RowEvaluator(
-                        parent_node=table_node,
-                        db_name=self.db_name,
-                        table_name=table_name,
-                        columns=overlap_cols,
-                        left_db_path=self.get_local_db_path(self.left_db_path),
-                        right_db_path=self.get_local_db_path(self.right_db_path),
-                    )
-                )
-        return diffs
-
-class RowCountDiff(BaseModel):
-    left_rows: int
-    right_rows: int
-
-    def has_diff(self):
-        """Returns true if the diff is non-empty."""
-        return self.left_rows != self.right_rows
-    
-    def __str__(self) -> str:
-        if self.has_diff():
-            d = self.right_rows - self.left_rows
-            return f"~ left={self.left_rows} right={self.right_rows}, diff={d}"
-        return ""
-
-class RowSampleDiff(BaseModel):
-    """Represents sample of rows that are unique to either side."""
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-    left_only_rows: pd.DataFrame
-    right_only_rows: pd.DataFrame
-    left_total_count: int
-    right_total_count: int
-
-    def has_diff(self):
-        """Returns true if either side has unique rows."""
-        return len(self.left_only_rows) > 0 or len(self.right_only_rows) > 0
-
-    def __str__(self):
-        """Prints row samples."""
-        if not self.has_diff():
-            return ""
-        parts = []
-        if len(self.left_only_rows):
-            parts.append(f"* left_only_rows ({self.left_total_count} total)")
-            parts.append(self.left_only_rows.to_string())
-        if len(self.right_only_rows):
-            parts.append(f"* right_only_rows ({self.right_total_count} total)")
-            parts.append(self.right_only_rows.to_string())
-        return "\n".join(parts)
-
-
-class RowEvaluator(DiffEvaluatorBase):
-    db_name: str
-    table_name: str
-    columns: list[str] = ["*"]
-    left_db_path: str 
-    right_db_path: str
-
-    def _count_rows(self, cx: sqlite3.Connection) -> int:
-        """Returns number of rows in a table."""
-        return cx.cursor().execute(
-            f"SELECT COUNT(*) FROM {self.table_name}"
-        ).fetchall()[0][0]
-
-    @tracer.start_as_current_span(name="outer_join_table")
-    def outer_join_table(self, ldb: sqlite3.Connection, rdb: sqlite3.Connection) -> (pd.DataFrame, pd.DataFrame):
-        """Runs outer join over the table contents.
-        
-        Returns two data-frames representing rows only found on the left side
-        and rows only found on the right side.
-        """
-        cols = ",".join(self.columns)
-        sql = f"SELECT {cols} FROM {self.table_name}"
-        
-        ldf = pd.read_sql_query(sql, ldb)
-        rdf = pd.read_sql_query(sql, rdb)
-        # TODO(rousik): We might improve effectiveness of join by setting indices
-        # to match primary key columns. This might not, however, detect row
-        # discrepancies among rows that differ on non-PK columns.
-        # For those records, we could simply compare row-by-row matching on the 
-        # primary keys from the two dfs (i.e. avoid outer joins).
-        
+    def compare_raw_tables(self, ldb: Connection, rdb: Connection) -> AnalysisReport:
+        """Compare two tables that do not have primary key columns."""
+        ldf = pd.read_sql_table(self.table_name, ldb)
+        rdf = pd.read_sql_table(self.table_name, rdb)
         merged = ldf.merge(rdf, how="outer", indicator=True)
-        lo = merged[merged["_merge"] == "left_only"]
-        ro = merged[merged["_merge"] == "right_only"]
-        return lo, ro
+        orig_row_count = len(ldf.index)
+        rows_added = len(merged[merged._merge == "right_only"].index)
+        rows_removed = len(merged[merged._merge == "left_only"].index)
 
-    @tracer.start_as_current_span(name="SQLite.RowEvaluator.execute")
-    def execute(self, task_queue: Queue[DiffEvaluator]) -> list[DiffTreeNode]:
-        """Analyze rows of a given table."""
-        sp = trace.get_current_span()
-        sp.set_attribute("db_name", self.db_name)
-        sp.set_attribute("table_name", self.table_name)
-        diffs = []
+        md = StringIO()
+        if rows_added: 
+            pct_change = float(rows_added) * 100 / orig_row_count 
+            md.write(f" * added {rows_added} rows ({pct_change:.2f}% change)")
+        if rows_removed:
+            pct_change = float(rows_removed) * 100 / orig_row_count 
+            md.write(f" * removed {rows_removed} rows ({pct_change:.2f}% change)")
 
-        ldb = sqlite3.connect(self.left_db_path)
-        rdb = sqlite3.connect(self.right_db_path)
-
-        if SQLiteEvaluationSettings().count_rows:
-            lrows = self._count_rows(ldb)
-            rrows = self._count_rows(rdb)
-            diffs.append(self.parent_node.add_child(
-                DiffTreeNode(
-                    name="RowCount",
-                    diff=RowCountDiff(left_rows=lrows, right_rows=rrows),
-                )
-            ))
-            # Running full outer join on the table may be memory intensive
-            # and slow, but let's try going with this naive approach before
-            # we find out this is not applicable.
+        return AnalysisReport(
+            object_path=self.object_path,
+            title=f"## {self.db_name}/{self.table_name} rows",
+            markdown=md.getvalue(),
+        )
+    
+    def compare_pk_tables(
+              self,
+              ldb: Connection,
+              rdb: Connection,
+              pk_cols: list[str],
+    ) -> AnalysisReport:
+            """Compare two tables with primary key columns.
             
-            # Very large datasets may prove to be problematic here.
+            Args:
+                ldb: connection to the left database
+                rdb: connection to the right database
+                pk_cols: primary key columns
+            """
+            ldf = pd.read_sql_table(self.table_name, ldb, index_col=pk_cols, columns=pk_cols)
+            rdf = pd.read_sql_table(self.table_name, rdb, index_col=pk_cols, columns=pk_cols)
+            idx_merge = ldf.merge(rdf, how="outer", indicator=True, left_index=True, right_index=True)
+    
+            orig_row_count = len(ldf.index)
+            rows_added = len(idx_merge[idx_merge._merge == "right_only"].index)
+            rows_removed = len(idx_merge[idx_merge._merge == "left_only"].index)
 
-            # There's also a possibility that some column types may be unstable
-            # and we might need to employ fuzzy-matching (e.g. FLOATS)
-        if SQLiteEvaluationSettings().compare_rows:
-            lo, ro = self.outer_join_table(ldb, rdb)
-            diffs.append(self.parent_node.add_child(
-                DiffTreeNode(
-                    name="RowsFullComparison",
-                    diff=RowSampleDiff(
-                        left_only_rows=lo.head(n=SQLiteEvaluationSettings().unique_rows_sample),
-                        right_only_rows=ro.head(n=SQLiteEvaluationSettings().unique_rows_sample),
-                        left_total_count=len(lo),
-                        right_total_count=len(ro),
-                    )
-                )
-            ))
-        return diffs
+            # TODO(rousik): if a single report can have more ReportBlocks, we could
+            # also indicate severity of added/removed rows.
+            md = StringIO()
+            if rows_added:
+                pct_change = float(rows_added) * 100 / orig_row_count
+                md.write(f"* added {rows_added} rows ({pct_change:.2f}% change)\n")
+            if rows_removed:
+                pct_change = float(rows_removed) * 100 / orig_row_count
+                md.write(f"* removed {rows_removed} rows ({pct_change:.2f}% change)\n")
+
+            # Now, we need to compare rows that are present on both sides.
+            # We will load dataframes from the database, and filter them
+            # by the rows that are present on both sided.
+            overlap_df = idx_merge[idx_merge._merge == "both"]
+            l_overlap_df = self.load_and_filter_rows(ldb, pk_cols, overlap_df)
+            r_overlap_df = self.load_and_filter_rows(rdb, pk_cols, overlap_df)
+
+            diff_rows_df = l_overlap_df.compare(r_overlap_df, result_names=("left", "right"), align_axis=0)
+            # TODO(rousik): possibly apply numeric tolerances here to filter out
+            # close enough rows.
+            rows_changed = len(diff_rows_df.index)
+
+            if rows_changed:
+                pct_change = float(rows_changed) * 100 / orig_row_count
+                md.write(f"* changed {rows_changed} rows ({pct_change:.2f}% change)\n")
+                # TODO(rousik): optionally add examples of the affected rows; tune
+                # this output.
+                md.write("\n")
+                md.write("### Examples of rows with changes:\n")
+                diff_rows_df.head(5).to_markdown(md)
+                
+            return AnalysisReport(
+                object_path=self.object_path,
+                title=f"## {self.db_name}/{self.table_name} rows",
+                markdown=md.getvalue(),
+            )
+
+    def load_and_filter_rows(
+            self,
+            db: Connection,
+            pk_cols: list[str],
+            filter_df: pd.DataFrame) -> pd.DataFrame:
+        """Load rows from the database, filter by filter_df.
+        
+        Args:
+            db: Open connection to the database to load from.
+            pk_cols: columns that are part of the primary key, these
+                columns will be turned into the index.
+            filter_df: dataframe with the primary key columns as the
+                index.
+
+        Returns:
+            rows from the table, where primary key matches records from
+            the filter_df    
+        """
+        df = pd.read_sql_table(self.table_name, db, index_col=pk_cols)
+        return df[df.index.isin(filter_df.index)]

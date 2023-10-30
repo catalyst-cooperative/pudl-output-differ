@@ -11,16 +11,20 @@ For other files, file checksums are calculated and compared instead.
 import argparse
 import atexit
 import logging
-import os
 import shutil
 import sys
 import tempfile
 
-from pudl_output_differ.files import DirectoryAnalyzer, OutputDirectoryEvaluator
-from pudl_output_differ.types import DiffTreeNode, TaskQueue
-from github import Github
+from pudl_output_differ.files import DirectoryAnalyzer
+from pudl_output_differ.types import TaskQueue
+from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry import trace
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 def parse_command_line(argv) -> argparse.Namespace:
@@ -50,6 +54,16 @@ def parse_command_line(argv) -> argparse.Namespace:
         help="Number of worker threads to use."
     )
     parser.add_argument(
+        "--catch-exceptions", type=bool, default=False,
+        help="""If True, runtime exceptions produced by analyzers will
+        be rendered as markdown and included in the report.
+        If False, these exceptions will be re-raised and the program will
+        abort.
+        """
+    )
+
+
+    parser.add_argument(
         "--github-repo", type=str, default="",
         help="Name of the github repository where comments should be posted."
     )
@@ -58,9 +72,13 @@ def parse_command_line(argv) -> argparse.Namespace:
         help="If supplied, diff will be published as a comment to the github PR."
     )
     parser.add_argument(
-        "--trace-backend-otel",
-        default="http://localhost:4317",
+        "--trace-backend",
+        default="http://localhost:4317/",
         help="Address of the OTEL compatible trace backend."
+    )
+    parser.add_argument(
+        "--loglevel", type=str, default="INFO",
+        help="Controls the severity of logging.",
     )
     arguments = parser.parse_args(argv[1:])
     return arguments
@@ -70,7 +88,22 @@ def main() -> int:
     """Run differ on two directories."""
     args = parse_command_line(sys.argv)
     
-    logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+    logging.basicConfig(stream=sys.stdout, level=args.loglevel)
+
+    if args.trace_backend:
+        logger.info(f"Configuring tracing to OTEL backend {args.trace_backend}")
+        provider = TracerProvider(
+            resource=Resource(
+                attributes={
+                    SERVICE_NAME: "pudl-output-differ",
+                },
+            ),
+        )
+        processor = BatchSpanProcessor(
+            OTLPSpanExporter(endpoint=args.trace_backend)
+        )
+        provider.add_span_processor(processor)
+        trace.set_tracer_provider(provider)
 
     # provider = TracerProvider()
     # TODO(rousik): add support for other trace backends.
@@ -80,22 +113,46 @@ def main() -> int:
 
     if not args.cache_dir:
         args.cache_dir = tempfile.mkdtemp()
+        logger.info(f"Created temporary cache directory {args.cache_dir}")
         atexit.register(shutil.rmtree, args.cache_dir)
 
     lpath = args.left
     rpath = args.right
-        
-    task_queue = TaskQueue(max_workers=args.max_workers)
 
-    task_queue.put(
-        DirectoryAnalyzer(
-            left_path=lpath,
-            right_path=rpath,
-            local_cache_root=args.cache_dir, 
+    with tracer.start_as_current_span(name="main"):
+        task_queue = TaskQueue(max_workers=args.max_workers)
+
+        task_queue.put(
+            DirectoryAnalyzer(
+                object_path=[],
+                left_path=lpath,
+                right_path=rpath,
+                local_cache_root=args.cache_dir, 
+                filename_filter=args.filename_filter,
+            )
         )
-    )
-    # Debug diagnostic
-    task_queue.wait()
+        reports = 0
+        for analysis in task_queue.iter_analyses(catch_exceptions=args.catch_exceptions):
+            reports += 1
+            # TODO(rousik): it would be good if AnalysisReport contained metadata
+            # identifyng the analyzer that produced it. Perhaps we could use
+            # wrapper that will contain both the analysis, as well as the analyzer
+            # metadata, e.g.:
+            # - object_path
+            # - instance that produced it (config)
+            # - possible runtime exception information (so that we can distinguish)
+            # Analysis itself could have severity (ERROR, WARNING) to indicate
+            # whether the problem is serious or not.
+            if analysis.markdown:
+                print(analysis.title)
+                print(analysis.markdown)
+                print()
+        logger.info(f"Processed all analyses, with total {reports} reports.")
+
+    # TODO(rousik): for the proper output, sort the 
+    # analyses by their object_path and construct the
+    # title depth automatically (by skipping empty analyses
+    # or by calculating depth based on the object_path).    
 
     # if args.github_pr and args.github_repo:
     #     gh = Github(os.environ["GITHUB_TOKEN"])

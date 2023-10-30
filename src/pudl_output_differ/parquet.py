@@ -39,7 +39,8 @@ class ParquetEvaluator(DiffEvaluatorBase):
                         name="ParquetSchema",
                         diff=KeySetDiff.from_sets(
                             set(self.get_columns(lmeta.schema)),
-                            set(self.get_columns(rmeta.schema))
+                            set(self.get_columns(rmeta.schema)),
+                            entity="columns",
                         )
                     )
                 )

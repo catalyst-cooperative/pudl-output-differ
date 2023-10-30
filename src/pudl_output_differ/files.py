@@ -56,19 +56,21 @@ class DirectoryAnalyzer(GenericAnalyzer):
         Uses fsspec filecache feature to retrieve remote files.
         """
         fs, fspath = fsspec.core.url_to_fs(full_path)
-        if "gcs" in fs.protocol:
-            fs = fsspec.filesystem(
-                "filecache",
-                target_protocol="gcs",
-                cache_storage=self.local_cache_root,
-            )
-            f = fs.open(f"filecache://{fspath}")
-            logger.info(f"Remote file {full_path} cached as {f.name}")
-            # TODO(rousik): perhaps the best approach would be to instantiate
-            # filecache once and pass it to SQLiteAnalyzer, with the full
-            # paths rewritten. That way, we can use provided filecache
-            # fs to detrmine local path only when needed.
-            return f.name
+        if "gcs" not in fs.protocol:
+            return fspath
+        
+        fs = fsspec.filesystem(
+            "filecache",
+            target_protocol="gcs",
+            cache_storage=self.local_cache_root,
+        )
+        f = fs.open(f"filecache://{fspath}")
+        logger.info(f"Remote file {full_path} cached as {f.name}")
+        # TODO(rousik): perhaps the best approach would be to instantiate
+        # filecache once and pass it to SQLiteAnalyzer, with the full
+        # paths rewritten. That way, we can use provided filecache
+        # fs to detrmine local path only when needed.
+        return f.name
 
     # TODO(rousik): passing parents this way is a bit clunky, but acceptable.
     @tracer.start_as_current_span(name="DirectoryAnalyzer")
@@ -95,8 +97,9 @@ class DirectoryAnalyzer(GenericAnalyzer):
                 task_queue.put(
                     SQLiteAnalyzer(
                         object_path = [Database(name=shared_file)],
-                        left_path=left_path,
-                        right_path=right_path,
+                        db_name = shared_file,
+                        left_db_path=left_path,
+                        right_db_path=right_path,
                     )
                 )
             # TODO(rousik): Add analyses for parquet and other 
