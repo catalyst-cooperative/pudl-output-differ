@@ -176,10 +176,12 @@ class TableAnalyzer(GenericAnalyzer):
             )
         md = StringIO()
         part_func = self.get_partition_func()
+        if partition_diff.has_diff():
+            md.write(f"Change in partitions (using partition function: {part_func}):\n")
         for pk in partition_diff.left_only:
-            md.write(f"* partition {part_func}={pk} removed ({lparts[pk]} rows)\n")
+            md.write(f"* partition {pk} removed ({lparts[pk]} rows)\n")
         for pk in partition_diff.right_only:
-            md.write(f"* partition {part_func}={pk} added ({rparts[pk]} rows)\n")
+            md.write(f"* partition {pk} added ({rparts[pk]} rows)\n")
 
         return AnalysisReport(
             object_path=self.object_path,
@@ -223,7 +225,7 @@ class TableAnalyzer(GenericAnalyzer):
         """Compare two tables that do not have primary key columns.
         
         For now, simply assess the rate of change in number of rows without digging
-        deeper into these tables.
+        deeper into these tables. 
         """
         lrows = int(ldb.execute(text("SELECT COUNT(*) FROM :table"), parameters={"table": self.table_name}).scalar())
         rrows = int(rdb.execute(text("SELECT COUNT(*) FROM :table"), parameters={"table": self.table_name}).scalar())
