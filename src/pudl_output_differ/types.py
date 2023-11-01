@@ -161,6 +161,16 @@ class TaskQueue:
         """Waits until all tasks are done."""
         concurrent.futures.wait(self.analyses.keys(), return_when=ALL_COMPLETED)
 
+    def to_markdown(self, catch_exceptions: bool = True) -> str:
+        reports = list(self.iter_analyses(catch_exceptions=catch_exceptions))
+        reports.sort(key=lambda r: r.object_path)
+        md = StringIO()
+        for rep in reports:
+            if rep.has_changes():
+                md.write(f"{rep.title}\n")
+                md.write(rep.markdown)
+        return md.getvalue()
+     
     def get_analyses(self, catch_exceptions:bool = True) -> list[AnalysisReport]:
         """Retrieve all analysis reports.
 

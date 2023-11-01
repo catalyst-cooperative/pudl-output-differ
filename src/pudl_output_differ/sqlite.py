@@ -315,7 +315,11 @@ class TableAnalyzer(GenericAnalyzer):
                 rdf = self.get_records(rdb, index_columns=pk_cols)
                 rdf = rdf[rdf.index.isin(overlap_index)]
 
-                diff_rows = ldf.compare(rdf, result_names=("left", "right"), align_axis=0)
+                # Note that if we use align_axis=0, diff_rows.index will double
+                # count changed records due to the index being expanded with
+                # left/right fields.
+                diff_rows = ldf.compare(rdf, result_names=("left", "right"))
+                
                 # TODO(rousik): Do something useful with the detected discrepancies, e.g. 
                 # identify columns that hold the changes and emit those in the report.
                 
