@@ -1,6 +1,5 @@
 """Generic types used in output diffing."""
 from asyncio import ALL_COMPLETED
-from enum import IntEnum
 from functools import total_ordering
 from io import StringIO
 import logging
@@ -41,16 +40,17 @@ class TypeDef(BaseModel):
         return False
 
 
-class ReportSeverity(IntEnum):
-    """Indicates the severity of a given report."""
-    WARNING = 1
-    ERROR = 2
+# TODO(rousik): add the following, when useful.
+# class ReportSeverity(IntEnum):
+#     """Indicates the severity of a given report."""
+#     WARNING = 1
+#     ERROR = 2
 
 
-class ReportBlock(BaseModel):
-    """Represents single block of data that is part of the report."""
-    severity: ReportSeverity = ReportSeverity.ERROR
-    content: str = ""
+# class ReportBlock(BaseModel):
+#     """Represents single block of data that is part of the report."""
+#     severity: ReportSeverity = ReportSeverity.ERROR
+#     content: str = ""
 
 
 class AnalysisReport(BaseModel):
@@ -94,11 +94,17 @@ class GenericAnalyzer(BaseModel):
 
 class TaskQueue:
     """Thread pool backed executor for diff evaluation."""
-    def __init__(self, max_workers: int = 1):
-        # TODO(rousik): raise max_worker to something higher,
-        # but then also consider high-priority tasks that should
-        # not be run among other high-priority tasks.
-        # Perhaps put() method should indicate priority?
+    def __init__(self, max_workers: int = 1, no_threadpool: bool = False):
+        # TODO(rousik): when dealing with sqlite tables, we could consider
+        # estimating their payload size and assigning cost to each task
+        # to ensure that we do not overload the worker with memory
+        # pressure.
+        # For now, using single worker (slower but safer) is a reasonable
+        # workaround or initial strategy.
+        # We could also indicate which tables are possibly expensive
+        # in the differ configuration, which will eliminate the need
+        # for dynamically estimating the cost.
+
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         self._lock = threading.Lock()
         self.analyses: dict[concurrent.futures.Future, Analyzer] = {}
@@ -116,6 +122,7 @@ class TaskQueue:
                     ctx = TraceContextTextMapPropagator().extract(carrier=self.trace_carrier)
                     token = context.attach(ctx)
                     try:
+                        logger.debug(f"Executing {analyzer.__class__.__name__} with configuration: {analyzer}")
                         return analyzer.execute(self)
                     finally:
                         context.detach(token)

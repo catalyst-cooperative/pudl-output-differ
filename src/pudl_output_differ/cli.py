@@ -15,7 +15,7 @@ import shutil
 import sys
 import tempfile
 
-from pudl_output_differ.files import DirectoryAnalyzer
+from pudl_output_differ.files import DirectoryAnalyzer, is_remote
 from pudl_output_differ.types import TaskQueue
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -50,7 +50,7 @@ def parse_command_line(argv) -> argparse.Namespace:
         help="If specified, only look at files that match this regex filter."
     )
     parser.add_argument(
-        "--max-workers", type=int, default=4, 
+        "--max-workers", type=int, default=1,
         help="Number of worker threads to use."
     )
     parser.add_argument(
@@ -111,7 +111,7 @@ def main() -> int:
     # provider.add_span_processor(processor)
     # trace.set_tracer_provider(provider)
 
-    if not args.cache_dir:
+    if not args.cache_dir and any(is_remote(p) for p in [args.left, args.right]):
         args.cache_dir = tempfile.mkdtemp()
         logger.info(f"Created temporary cache directory {args.cache_dir}")
         atexit.register(shutil.rmtree, args.cache_dir)
@@ -132,6 +132,7 @@ def main() -> int:
             )
         )
         reports = 0
+        nonempty_reports = 0
         for analysis in task_queue.iter_analyses(catch_exceptions=args.catch_exceptions):
             reports += 1
             # TODO(rousik): it would be good if AnalysisReport contained metadata
@@ -144,10 +145,11 @@ def main() -> int:
             # Analysis itself could have severity (ERROR, WARNING) to indicate
             # whether the problem is serious or not.
             if analysis.markdown:
+                nonempty_reports += 1
                 print(analysis.title)
                 print(analysis.markdown)
                 print()
-        logger.info(f"Processed all analyses, with total {reports} reports.")
+        logger.info(f"Total {reports} reports, with {nonempty_reports} nonempty.")
 
     # TODO(rousik): for the proper output, sort the 
     # analyses by their object_path and construct the

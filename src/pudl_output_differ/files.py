@@ -16,6 +16,14 @@ logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
 
+def is_remote(dir: str) -> bool:
+    """Returns true if the directory points to a remote fs."""
+    fs, fs_base_path = fsspec.core.url_to_fs(dir)
+    # TODO(rousik): this doesn't support s3 or other remote fs
+    # yet, but that's okay as we don't work with those.
+    return "gcs" in fs.protocol
+
+
 class DirectoryAnalyzer(GenericAnalyzer):
     """Compares two directories for files."""
     left_path: str
@@ -24,7 +32,7 @@ class DirectoryAnalyzer(GenericAnalyzer):
     # TODO(rousik): The following should be runtime
     # settings for this analyzer, ideally loaded from
     # aconfig file or env variables.
-    local_cache_root: str
+    local_cache_root: str | None = None
     filename_filter: str = ""
 
     
@@ -59,6 +67,8 @@ class DirectoryAnalyzer(GenericAnalyzer):
         if "gcs" not in fs.protocol:
             return fspath
         
+        if not self.local_cache_root:
+            raise RuntimeError("Local cache root is not set.")
         fs = fsspec.filesystem(
             "filecache",
             target_protocol="gcs",
@@ -102,16 +112,7 @@ class DirectoryAnalyzer(GenericAnalyzer):
                         right_db_path=right_path,
                     )
                 )
-            # TODO(rousik): Add analyses for parquet and other 
-            # formats.
-            # elif shared_file.endswith(".parquet"):
-            #     task_queue.put(
-            #         ParquetEvaluator(
-            #             left_path=lfs[shared_file],
-            #             right_path=rfs[shared_file],
-            #             parent_node=files_node,
-            #         )
-            #     )
+            # TODO(rousik): other file formats are: json, parquet, yml.
 
         return AnalysisReport(
             object_path = [],
