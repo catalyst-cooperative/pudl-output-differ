@@ -4,22 +4,15 @@ from textwrap import dedent
 from typing import Any
 import unittest
 from pudl_output_differ import sqlite
-from pudl_output_differ.types import AnalysisReport, Analyzer, TaskQueue
+from pudl_output_differ.types import TaskQueue
 
-class DirectExecutor:
-    def __init__(self):
-        self.reports: list[AnalysisReport] = []
-        
-    def put(self, analyzer: Analyzer): 
-        self.reports.append(analyzer.execute(self))
-
-# TODO(rousik): we could set up temporary sqlite databases for testing as 
+# TODO(rousik): we could set up temporary sqlite databases for testing as
 # part of the test cases.
 
 
 def make_temp_db(sql_script: str) -> Any:
     """Creates a temporary sqlite database.
-    
+
     It invokes the sql_script to bootstrap the database
     and returns the file-like object that represents
     the database. This can be opened by using its .name
@@ -31,6 +24,22 @@ def make_temp_db(sql_script: str) -> Any:
     conn.commit()
     conn.close()
     return temp_file
+
+
+class LiveTest(unittest.TestCase):
+    def test_live_data(self):
+        task_queue = TaskQueue(max_workers=1)
+        task_queue.put(
+            sqlite.TableAnalyzer(
+                object_path=[],
+                db_name="pudl.sqlite",
+                table_name="mcoe_generators_yearly",
+                left_db_path="/Users/rousik/pudl-data/fast-samples/left/pudl.sqlite",
+                right_db_path="/Users/rousik/pudl-data/fast-samples/right/pudl.sqlite",
+            )
+        )
+        print(task_queue.to_markdown())
+
 
 class TestSQLiteAnalyzer(unittest.TestCase):
     def test_compare_pk_tables(self):
@@ -65,22 +74,25 @@ class TestSQLiteAnalyzer(unittest.TestCase):
         # In the above table, 2019/CA has changed, 2021/CO is deleted and 1984/NH is added.
         task_queue = TaskQueue(max_workers=1)
         task_queue.put(
-             sqlite.SQLiteAnalyzer(
+            sqlite.SQLiteAnalyzer(
                 object_path=[],
                 db_name="test",
                 left_db_path=left.name,
                 right_db_path=right.name,
-             )
+            )
         )
         self.assertEqual(
-            dedent("""\
+            dedent(
+                """\
             ## Table test/foo rows
             * added 1 rows (25.00% change)
             * removed 1 rows (25.00% change)
             * changed 1 rows (25.00% change)
-            """),
-            task_queue.to_markdown())
+            """
+            ),
+            task_queue.to_markdown(),
+        )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -2,14 +2,18 @@
 
 from io import StringIO
 import logging
-from typing import Any, Optional
+from typing import Optional
 import pandas as pd
 from opentelemetry import trace
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import Connection, Engine, create_engine, inspect, text
 
 from pudl_output_differ.types import (
-    AnalysisReport, GenericAnalyzer, KeySetDiff, TaskQueue, TypeDef
+    AnalysisReport,
+    GenericAnalyzer,
+    KeySetDiff,
+    TaskQueue,
+    TypeDef,
 )
 
 logger = logging.getLogger(__name__)
@@ -21,24 +25,31 @@ REPORT_YEAR_PARTITION = "substr(report_date, 1, 4)"
 
 class SQLiteSettings(BaseSettings):
     """Default configuration for this module."""
+
     model_config = SettingsConfigDict(env_prefix="diff_")
     sqlite_tables_only: list[str] = []
-    sqlite_tables_exclude: list[str] = []
+    sqlite_tables_exclude: list[str] = ["alembic_version"]
     partitioning_schema: dict[str, str] = {
         "mcoe_monthly": REPORT_YEAR_PARTITION,
         "mcoe_generators_monthly": REPORT_YEAR_PARTITION,
         "generation_fuel_by_generator_energy_source_monthly_eia923": REPORT_YEAR_PARTITION,
         "demand_hourly_pa_ferc714": "report_date",
     }
+    # If set to true, we will only fetch the data from tables once; all matching
+    # columns. Otherwise we will fetch PK only and then only fetch overlapping
+    # rows for the matching PKs.
+    single_pass_pk_comparison: bool = False
 
 
 class Database(TypeDef):
     """Represents a database."""
+
     name: str
 
 
 class Table(TypeDef):
     """Represents a table in a database."""
+
     name: str
 
 
@@ -46,7 +57,7 @@ class SQLiteAnalyzer(GenericAnalyzer):
     db_name: str
     left_db_path: str
     right_db_path: str
-    
+
     def list_tables(self, engine: Engine) -> set[str]:
         """Returns set of table names in the database."""
         return set(inspect(engine).get_table_names())
@@ -68,11 +79,21 @@ class SQLiteAnalyzer(GenericAnalyzer):
         )
         for table_name in sorted(tables_diff.shared):
             settings = SQLiteSettings()
-            if settings.sqlite_tables_exclude and table_name in settings.sqlite_tables_exclude:
-                logger.debug(f"Table {table_name} skipped due to config exclusion via sqlite_tables_exclude.")
+            if (
+                settings.sqlite_tables_exclude
+                and table_name in settings.sqlite_tables_exclude
+            ):
+                logger.debug(
+                    f"Table {table_name} skipped due to config exclusion via sqlite_tables_exclude."
+                )
                 continue
-            if settings.sqlite_tables_only and table_name not in settings.sqlite_tables_only:
-                logger.debug(f"Table {table_name} skipped due to not in the list of sqlite_tables_only.")
+            if (
+                settings.sqlite_tables_only
+                and table_name not in settings.sqlite_tables_only
+            ):
+                logger.debug(
+                    f"Table {table_name} skipped due to not in the list of sqlite_tables_only."
+                )
                 continue
 
             task_queue.put(
@@ -90,9 +111,10 @@ class SQLiteAnalyzer(GenericAnalyzer):
             markdown=tables_diff.markdown(),
         )
 
-        
+
 class TableAnalyzer(GenericAnalyzer):
     """Analyzes contents of a single sqlite table."""
+
     db_name: str
     left_db_path: str
     right_db_path: str
@@ -101,40 +123,53 @@ class TableAnalyzer(GenericAnalyzer):
 
     def get_pk_columns(self, engine: Engine) -> list[str]:
         """Returns list of primary key columns."""
-        return list(inspect(engine).get_pk_constraint(self.table_name)["constrained_columns"])
-    
+        return list(
+            inspect(engine).get_pk_constraint(self.table_name)["constrained_columns"]
+        )
+
+    def get_columns(self, engine: Engine) -> dict[str, str]:
+        """Returns dictionary mapping column names to column types."""
+        return {
+            col["name"]: str(col["type"])
+            for col in inspect(engine).get_columns(self.table_name)
+        }
+
     def get_partition_func(self) -> Optional[str]:
         """Retrieves partition function for this table.
-        
+
         Returns the partition function, or None if this table is not partitioned.
         """
         return SQLiteSettings().partitioning_schema.get(self.table_name, None)
-    
+
     def is_partitioned_table(self) -> bool:
         """Returns true if this table should be partitioned."""
         return self.get_partition_func() is not None
-        
+
     def get_partitions(self, conn: Connection) -> dict[str, int]:
         """Returns table partitions, dict maps partition_keys to number of rows.
-        
+
         Partition keys are calculated by the table's partition_func retrieved from
         the partitioning_schema. Values are assumed to be strings.
         """
         if self.get_partition_func() is None:
             raise RuntimeError(f"Partitions not supported for table {self.table_name}")
-        
+
         part_func = self.get_partition_func()
         df = pd.read_sql_query(
             f"SELECT {part_func} AS partition_key, COUNT(*) AS num_rows FROM {self.table_name} GROUP BY partition_key",
             conn,
         )
-        partitions = { r["partition_key"]: r["num_rows"] for _, r in df.iterrows() }
+        partitions = {r["partition_key"]: r["num_rows"] for _, r in df.iterrows()}
         if "" in partitions:
-            raise AssertionError(f"Empty partition key found for table {self.table_name}")
+            raise AssertionError(
+                f"Empty partition key found for table {self.table_name}"
+            )
         return partitions
-    
+
     @tracer.start_as_current_span("split_to_partitioned_tasks")
-    def split_to_partitioned_tasks(self, task_queue: TaskQueue, lconn: Connection, rconn: Connection) -> AnalysisReport:
+    def split_to_partitioned_tasks(
+        self, task_queue: TaskQueue, lconn: Connection, rconn: Connection
+    ) -> AnalysisReport:
         """Splits table analysis into partitioned tasks.
 
         Partition keys are calculated, new task is then submitted for each
@@ -145,15 +180,33 @@ class TableAnalyzer(GenericAnalyzer):
         rparts = self.get_partitions(rconn)
 
         if len(lparts) == len(rparts) == 0:
-            raise RuntimeError(f"Table {self.table_name} is partitioned, but has no partitions.")
+            raise RuntimeError(
+                f"Table {self.table_name} is partitioned, but has no partitions."
+            )
 
         if len(lparts) > 100 or len(rparts) > 100:
             logger.warn(
                 f"""Table {self.table_name} has too many partitions ({len(lparts)}, {len(rparts)}).
                 Consider better partition_func than: {self.get_partition_func()}"""
             )
-        avg_rows = sum(lparts.values()) / len(lparts)
-        logger.debug(f"Table {self.table_name} splits into {len(lparts)} partitions, with ~{avg_rows} rows per partition.")
+        avg_rows = (sum(rparts.values()) + sum(lparts.values())) / (
+            len(lparts) + len(lparts)
+        )
+        logger.debug(
+            f"Table {self.table_name} splits into {len(lparts)} partitions, with ~{avg_rows} rows per partition."
+        )
+
+        if None in lparts:
+            logger.error(
+                f"Left side of {self.table_name} contains null partition keys."
+            )
+            del lparts[None]
+
+        if None in rparts:
+            logger.error(
+                f"Right side of {self.table_name} contains null partition keys."
+            )
+            del rparts[None]
 
         logger.debug(f"partitions: {lparts}, {rparts}")
         partition_diff = KeySetDiff.from_sets(
@@ -163,7 +216,9 @@ class TableAnalyzer(GenericAnalyzer):
         )
 
         for partition_key in partition_diff.shared:
-            logger.debug(f"Submitting task for partition of {self.table_name}: {partition_key}")
+            logger.debug(
+                f"Submitting task for partition of {self.table_name}: {partition_key}"
+            )
             task_queue.put(
                 TableAnalyzer(
                     object_path=self.object_path,
@@ -177,7 +232,7 @@ class TableAnalyzer(GenericAnalyzer):
         md = StringIO()
         part_func = self.get_partition_func()
         if partition_diff.has_diff():
-            md.write(f"Change in partitions (using partition function: {part_func}):\n")
+            md.write(f"Change in partitions (using partition function: `{part_func}`):\n")
         for pk in partition_diff.left_only:
             md.write(f"* partition {pk} removed ({lparts[pk]} rows)\n")
         for pk in partition_diff.right_only:
@@ -185,10 +240,10 @@ class TableAnalyzer(GenericAnalyzer):
 
         return AnalysisReport(
             object_path=self.object_path,
-            title="## Table {self.db_name}/{self.table_name} partitioning",
+            title=f"## Table {self.db_name}/{self.table_name} partitioning",
             markdown=md.getvalue(),
         )
-    
+
     @tracer.start_as_current_span(name="TableAnalyzer.execute")
     def execute(self, task_queue: TaskQueue) -> AnalysisReport:
         """Analyze tables and their schemas."""
@@ -203,170 +258,211 @@ class TableAnalyzer(GenericAnalyzer):
 
         lconn = l_db_engine.connect()
         rconn = r_db_engine.connect()
-        
+
         # TODO(rousik): test for schema discrepancies here.
         l_pk = self.get_pk_columns(l_db_engine)
         r_pk = self.get_pk_columns(r_db_engine)
 
         if l_pk != r_pk:
-            raise RuntimeError(f"Primary key columns for {self.table_name} do not match.")
+            raise AssertionError(
+                f"Primary key columns for {self.table_name} do not match."
+            )
 
         if not self.partition_key and self.is_partitioned_table():
             return self.split_to_partitioned_tasks(task_queue, lconn, rconn)
-                
+
         if not l_pk:
             return self.compare_raw_tables(lconn, rconn)
-        else:
-            logger.debug(f"{self.table_name}: primary columns: {','.join(sorted(l_pk))}")
-            return self.compare_pk_tables(lconn, rconn, sorted(l_pk))
-        
+
+        return self.compare_pk_tables(lconn, rconn, sorted(l_pk))
+
     @tracer.start_as_current_span(name="compare_raw_tables")
     def compare_raw_tables(self, ldb: Connection, rdb: Connection) -> AnalysisReport:
         """Compare two tables that do not have primary key columns.
-        
+
         For now, simply assess the rate of change in number of rows without digging
-        deeper into these tables. 
+        deeper into these tables.
         """
-        lrows = int(ldb.execute(text("SELECT COUNT(*) FROM :table"), parameters={"table": self.table_name}).scalar())
-        rrows = int(rdb.execute(text("SELECT COUNT(*) FROM :table"), parameters={"table": self.table_name}).scalar())
-        pct_change = float(abs(lrows - rrows) * 100) / lrows
+        sql = f"SELECT COUNT(*) FROM {self.table_name}"
+        lrows = int(ldb.execute(text(sql)).scalar())
+        rrows = int(rdb.execute(text(sql)).scalar())
 
         if lrows > rrows:
+            pct_change = float(abs(lrows - rrows) * 100) / lrows
             return AnalysisReport(
                 object_path=self.object_path,
                 title=f"## {self.db_name}/{self.table_name} rows",
                 markdown=f" * removed {lrows - rrows} rows ({pct_change:.2f}% change)",
             )
         elif rrows > lrows:
+            if lrows > 0:
+                pct_change = float(abs(lrows - rrows) * 100) / lrows
+                msg = f" * added {rrows - lrows} rows ({pct_change:.2f}% change)"
+            else:
+                msg = f" * added {rrows} rows (no rows previously)"
+
             return AnalysisReport(
                 object_path=self.object_path,
                 title=f"## {self.db_name}/{self.table_name} rows",
-                markdown=f" * added {rrows - lrows} rows ({pct_change:.2f}% change)",
+                markdown=msg,
             )
+
+        # TODO(rousik): By doing df.merge() we should be able to tell how many rows were added/removed/changed.
+        # If there's change to any column content, this will be marked as both left_only and right_only
+        # and there's no way to easily tell that this is "changed" row, and this row will be double counted.
+
+        # The following is empty report with no content.
         return AnalysisReport(object_path=self.object_path)
 
     def get_records(
-            self, 
-            conn: Connection,
-            columns:list[str] = [],
-            index_columns: list[str] = []) -> pd.DataFrame:
+        self, conn: Connection, columns: list[str] = [], index_columns: list[str] = []
+    ) -> pd.DataFrame:
         """Retrieve records from this table.
-        
+
         If partition_key is set on this instance, it will use it to filter out the records
         that will be loaded.
         """
         if not self.is_partitioned_table():
-            return pd.read_sql_table(self.table_name, conn, columns=columns, index_col=index_columns)
-        
+            return pd.read_sql_table(
+                self.table_name, conn, columns=columns, index_col=index_columns
+            )
+
         selector = "*"
         if columns:
             selector = ", ".join(columns)
-    
 
-        sql = text(f"SELECT {selector} FROM {self.table_name} WHERE {self.get_partition_func()} = :partition_key")
+        sql = text(
+            f"SELECT {selector} FROM {self.table_name} WHERE {self.get_partition_func()} = :partition_key"
+        )
         df = pd.read_sql_query(sql, conn, params={"partition_key": self.partition_key})
         if index_columns:
             df = df.set_index(index_columns)
         return df
-    
+
+    # TODO(rousik): many of these operations could be simplified if we construct
+    # wrapper helper classes for handling pairs of objects, e.g. database connections
+    # or even pair of data-frames that could be compared for discrepancies.
+    # For now, this will be implemented in these methods and that's okay as a first pass.
+
     @tracer.start_as_current_span(name="compare_pk_tables")
     def compare_pk_tables(
-              self,
-              ldb: Connection,
-              rdb: Connection,
-              pk_cols: list[str],
+        self,
+        ldb: Connection,
+        rdb: Connection,
+        pk_cols: list[str],
     ) -> AnalysisReport:
-            """Compare two tables with primary key columns.
-            
-            Args:
-                ldb: connection to the left database
-                rdb: connection to the right database
-                pk_cols: primary key columns
-            """
-            md = StringIO()
-            overlap_index = None
-            with tracer.start_as_current_span("compare_primary_keys"):
-                # TODO(rousik): fetch the primary key columns, filtered by the partition if present.
-                ldf = self.get_records(ldb, columns=pk_cols, index_columns=pk_cols)
-                rdf = self.get_records(rdb, columns=pk_cols, index_columns=pk_cols)
-                logger.debug(f"{self.table_name}:{self.partition_key} left {len(ldf.index)} rows, right {len(rdf.index)} rows")
+        """Compare two tables with primary key columns.
 
-                idx_merge = ldf.merge(rdf, how="outer", indicator=True, left_index=True, right_index=True)
-                overlap_index = idx_merge[idx_merge._merge == "both"].index
-
-                orig_row_count = len(ldf.index)
-                rows_added = len(idx_merge[idx_merge._merge == "right_only"].index)
-                rows_removed = len(idx_merge[idx_merge._merge == "left_only"].index)
-
-                # TODO(rousik): we could take samples of the added/removed rows and emit markdown
-                # table to make it easier to compare.
-                if rows_added:
-                    pct_change = float(rows_added) * 100 / orig_row_count
-                    md.write(f"* added {rows_added} rows ({pct_change:.2f}% change)\n")
-                if rows_removed:
-                    pct_change = float(rows_removed) * 100 / orig_row_count
-                    md.write(f"* removed {rows_removed} rows ({pct_change:.2f}% change)\n")
-
-            with tracer.start_as_current_span("compare_overlapping_rows") as sp:
-                sp.set_attribute("num_rows", len(overlap_index))
-                ldf = self.get_records(ldb, index_columns=pk_cols)
-                ldf = ldf[ldf.index.isin(overlap_index)]
-
-                rdf = self.get_records(rdb, index_columns=pk_cols)
-                rdf = rdf[rdf.index.isin(overlap_index)]
-
-                # Note that if we use align_axis=0, diff_rows.index will double
-                # count changed records due to the index being expanded with
-                # left/right fields.
-                diff_rows = ldf.compare(rdf, result_names=("left", "right"))
-                
-                # TODO(rousik): Do something useful with the detected discrepancies, e.g. 
-                # identify columns that hold the changes and emit those in the report.
-                
-                # TODO(rousik): overlapping but changed rows should be dumped into some
-                # database where it can be further analyzed.
-                rows_changed = len(diff_rows.index)
-                if rows_changed:
-                    pct_change = float(rows_changed) * 100 / orig_row_count
-                    md.write(f"* changed {rows_changed} rows ({pct_change:.2f}% change)\n")
-
-            title=f"## Table {self.db_name}/{self.table_name} rows"
-            if self.partition_key:
-                title += f" (partition {self.get_partition_func()}={self.partition_key})"
-
-            return AnalysisReport(
-                object_path=self.object_path,
-                title=title,
-                markdown=md.getvalue(),
-            )
-
-    def load_and_filter_rows(
-            self,
-            db: Connection,
-            pk_cols: list[str],
-            filter_df: pd.DataFrame,
-            partition: dict[str, Any] | None = None,
-            ) -> pd.DataFrame:
-        """Load rows from the database, filter by filter_df.
-        
         Args:
-            db: Open connection to the database to load from.
-            pk_cols: columns that are part of the primary key, these
-                columns will be turned into the index.
-            filter_df: dataframe with the primary key columns as the
-                index.
-            partition: may be tuple of values that should be used
-                to retrieve partitioned data.
-
-        Returns:
-            rows from the table, where primary key matches records from
-            the filter_df    
+            ldb: connection to the left database
+            rdb: connection to the right database
+            pk_cols: primary key columns
         """
-        if partition is None:
-            df = pd.read_sql_table(self.table_name, db, index_col=pk_cols)
-        else:
-            sql = f"SELECT * FROM {self.table_name} WHERE {constraints}"
-            df = pd.read_sql_query(
+        md = StringIO()
+        overlap_index = None
+        ldf = None
+        rdf = None
 
+        lcols = self.get_columns(ldb.engine)
+        rcols = self.get_columns(rdb.engine)
+
+        cols_removed = set(lcols) - set(rcols)
+        if cols_removed:
+            cstr = ", ".join(sorted(cols_removed))
+            md.write(f" * {len(cols_removed)} columns removed: {cstr}\n")
+        cols_added = set(rcols) - set(lcols)
+        if cols_added:
+            cstr = ", ".join(sorted(cols_added))
+            md.write(f" * {len(cols_added)} columns added: {cstr}\n")
+
+        cols_intact = []
+        cols_changed = []
+        for col in set(lcols) & set(rcols):
+            if lcols[col] == rcols[col]:
+                cols_intact.append(col)
+            else:
+                cols_changed.append(col)
+        if cols_changed:
+            cstr = ", ".join(
+                "{c}({lcols[c]}->{rcols[c]})" for c in sorted(cols_changed)
             )
-        return df[df.index.isin(filter_df.index)]
+            md.write(f" * {len(cols_changed)} columns changed type: {cstr}\n")
+
+        # pk_cols should be filtered so that only cols_intact are considered
+        pk_cols_filtered = [c for c in pk_cols if c in cols_intact]
+        if len(pk_cols_filtered) != len(pk_cols):
+            pk_cols_dropped = sorted(set(pk_cols) - set(pk_cols_filtered))
+            md.write(
+                f" * {len(pk_cols_dropped)} primary key columns need to be dropped: {', '.join(pk_cols_dropped)}\n"
+            )
+            pk_cols = pk_cols_filtered
+
+        ldf = None
+        rdf = None
+
+        if SQLiteSettings().single_pass_pk_comparison:
+            ldf = self.get_records(ldb, columns=cols_intact, index_columns=pk_cols)
+            rdf = self.get_records(ldb, columns=cols_intact, index_columns=pk_cols)
+
+        with tracer.start_as_current_span("compare_primary_keys"):
+            # TODO(rousik): fetch the primary key columns, filtered by the partition if present.
+            if not SQLiteSettings().single_pass_pk_comparison:
+                with tracer.start_as_current_span("load_pk_dataframes"):
+                    ldf = self.get_records(ldb, columns=pk_cols, index_columns=pk_cols)
+                    rdf = self.get_records(rdb, columns=pk_cols, index_columns=pk_cols)
+
+            mrg = ldf.merge(rdf, how="outer", indicator=True, left_index=True, right_index=True, validate="one_to_one")
+            overlap_index = mrg[mrg._merge == "both"].index
+
+            orig_row_count = len(ldf)
+            rows_added = len(mrg[mrg._merge == "right_only"])
+            rows_removed = len(mrg[mrg._merge == "left_only"])
+
+            # TODO(rousik): we could take samples of the added/removed rows and emit markdown
+            # table to make it easier to compare.
+            if rows_added:
+                if orig_row_count > 0:
+                    pct_change = (
+                        f"({float(rows_added) * 100 / orig_row_count :.2f}% change)"
+                    )
+                else:
+                    pct_change = "(no rows previously)"
+                md.write(f"* added {rows_added} rows {pct_change}\n")
+            if rows_removed:
+                pct_change = (
+                    f"({float(rows_removed) * 100 / orig_row_count :.2f}% change)"
+                )
+                md.write(f"* removed {rows_removed} rows {pct_change}\n")
+
+        with tracer.start_as_current_span("compare_overlapping_rows") as sp:
+            sp.set_attribute("num_rows", len(overlap_index))
+            if SQLiteSettings().single_pass_pk_comparison:
+                ldf = ldf.loc[overlap_index]
+                rdf = rdf.loc[overlap_index]
+            else:
+                with tracer.start_as_current_span("load_overlapping_rows"):
+                    ldf = self.get_records(ldb, index_columns=pk_cols)
+                    ldf = ldf.loc[overlap_index]
+
+                    rdf = self.get_records(rdb, index_columns=pk_cols)
+                    rdf = rdf.loc[overlap_index]
+
+            diff_rows = ldf.compare(rdf, result_names=("left", "right"))
+            rows_changed = len(diff_rows)
+            if rows_changed:
+                pct_change = float(rows_changed) * 100 / orig_row_count
+                md.write(f"* changed {rows_changed} rows ({pct_change:.2f}% change)\n")
+
+                changes_per_column = (~diff_rows.isna()).groupby(axis=1, level=0).any().sum()
+                md.write("\nNumber of changes detected per column:\n")
+                md.write(changes_per_column.to_markdown())
+
+        title = f"## Table {self.db_name}/{self.table_name} rows"
+        if self.partition_key:
+            title += f" (partition {self.get_partition_func()}={self.partition_key})"
+
+        return AnalysisReport(
+            object_path=self.object_path,
+            title=title,
+            markdown=md.getvalue(),
+        )
