@@ -29,6 +29,27 @@ from mdx_gfm import GithubFlavoredMarkdownExtension
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
+# Removed the following from style:
+# max-width: 980px;
+
+MARKDOWN_CSS_STYLE = """
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="github-markdown-light.css">
+<style>
+	.markdown-body {
+		box-sizing: border-box;
+		min-width: 200px;
+		margin: 0 auto;
+		padding: 45px;
+	}
+
+	@media (max-width: 767px) {
+		.markdown-body {
+			padding: 15px;
+		}
+	}
+</style>
+"""
 
 def parse_command_line(argv) -> argparse.Namespace:
     """Parse command line arguments. See the -h option.
@@ -172,7 +193,10 @@ def main() -> int:
     if args.html_report:
         md = task_queue.to_markdown(catch_exceptions=True)
         with open(args.html_report, "w") as f:
+            f.write(MARKDOWN_CSS_STYLE)
+            f.write('<article class="markdown-body">')
             f.write(markdown.markdown(md, extensions=[GithubFlavoredMarkdownExtension()]))
+            f.write('</article>')
         with open(args.html_report + ".markdown", "w") as f:
             f.write(md)
 

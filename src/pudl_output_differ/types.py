@@ -154,7 +154,7 @@ class TaskQueue:
                     error_title = f"{analyzer.__class__.__name__} failed on {spath}"
                     if not catch_exceptions:
                         raise RuntimeError(error_title) from e
-                    logger.warning(f"Analyzer {analyzer.__class__.__name__} failed on {spath}: {repr(e)}")
+                    logger.error(f"Analyzer {analyzer.__class__.__name__} failed on {spath}: {repr(e)}")
 
                     # Otherwise, render exception as markdown.
                     yield AnalysisReport(
