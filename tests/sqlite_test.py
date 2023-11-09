@@ -3,6 +3,8 @@ import tempfile
 from textwrap import dedent
 from typing import Any
 import unittest
+
+from sqlalchemy import create_engine
 from pudl_output_differ import sqlite
 from pudl_output_differ.types import TaskQueue
 
@@ -27,19 +29,71 @@ def make_temp_db(sql_script: str) -> Any:
 
 
 class LiveTest(unittest.TestCase):
-    def test_live_data(self):
-        task_queue = TaskQueue(max_workers=1)
-        task_queue.put(
-            sqlite.TableAnalyzer(
-                object_path=[],
-                db_name="pudl.sqlite",
-                table_name="mcoe_generators_yearly",
-                left_db_path="/Users/rousik/pudl-data/fast-samples/left/pudl.sqlite",
-                right_db_path="/Users/rousik/pudl-data/fast-samples/right/pudl.sqlite",
-            )
-        )
-        print(task_queue.to_markdown())
+    TABLES_TO_TEST = [
+        "plant_parts_eia",
+    ]
+    def setUp(self):
+        """Show all diffs."""
+        self.maxDiff = None
+        self.left_db_path = "/Users/rousik/pudl-data/fast-samples/left/pudl.sqlite"
+        self.right_db_path = "/Users/rousik/pudl-data/fast-samples/right/pudl.sqlite"
+        self.left_db = create_engine("sqlite:////Users/rousik/pudl-data/fast-samples/left/pudl.sqlite")
+        self.right_db = create_engine("sqlite:////Users/rousik/pudl-data/fast-samples/right/pudl.sqlite")
 
+    # TODO(rousik): Further tests here could involve
+    # 1. testing sharding of the tables (submitting TableEvaluation tasks with the right
+    # partition keys)
+    # 2. testing various scenarios of pk/full comparison in one/two way mode.
+
+    # TODO(rousik): we could invoke compare_pk_table() directly to see
+    # why there are differences in the two runs.
+    def test_two_evaluation_modes(self):
+        """Make sure that running one-way and two-way comparison yields same results."""
+        two_way = sqlite.TableAnalyzer(
+            object_path=[],
+            db_name="pudl.sqlite",
+            table_name="coalmine_eia923",
+            left_db_path=self.left_db_path,
+            right_db_path=self.right_db_path,
+            settings=sqlite.SQLiteSettings(single_pass_pk_comparison=False),
+        )
+        one_way = sqlite.TableAnalyzer(
+            object_path=[],
+            db_name="pudl.sqlite",
+            table_name="coalmine_eia923",
+            left_db_path=self.left_db_path,
+            right_db_path=self.right_db_path,
+            settings=sqlite.SQLiteSettings(single_pass_pk_comparison=True),
+        )
+        lconn = self.left_db.connect()
+        rconn = self.right_db.connect()
+        pk_cols = two_way.get_pk_columns(self.left_db)
+        first_report = two_way.compare_pk_tables(lconn, rconn, pk_cols)
+        second_report = one_way.compare_pk_tables(lconn, rconn, pk_cols)
+        self.assertEqual(first_report, second_report)
+
+    def test_live_data(self):
+        for table_name in self.TABLES_TO_TEST:
+            task_queue = TaskQueue(max_workers=1)
+            task_queue.put(
+                sqlite.TableAnalyzer(
+                    object_path=[],
+                    db_name="pudl.sqlite",
+                    table_name=table_name,
+                    left_db_path="/Users/rousik/pudl-data/fast-samples/left/pudl.sqlite",
+                    right_db_path="/Users/rousik/pudl-data/fast-samples/right/pudl.sqlite",
+                    settings=sqlite.SQLiteSettings(
+                        single_pass_pk_comparison=False,
+                    )
+                )
+            )
+            self.assertEqual("", task_queue.to_markdown())
+            # print(task_queue.to_markdown())
+            # TODO(rousik): consider bunch of test cases that have left.sqlite, right.sqlite and report.md
+            # files. Those will then be iterated over, executed and compared.
+
+            # Perhaps a tool could be built to extract some table from existing sqlite files for generating
+            # these test cases.
 
 class TestSQLiteAnalyzer(unittest.TestCase):
     def test_compare_pk_tables(self):

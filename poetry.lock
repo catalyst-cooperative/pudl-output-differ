@@ -1316,6 +1316,20 @@ files = [
 ]
 
 [[package]]
+name = "py-gfm"
+version = "2.0.0"
+description = "An implementation of Github-Flavored Markdown written as an extension to the Python Markdown library."
+optional = false
+python-versions = ">=3.8"
+files = [
+    {file = "py-gfm-2.0.0.linux-x86_64.tar.gz", hash = "sha256:8768b31bbfda8e1d52e2f32b363c138eedf52b1a81c06036b60ece576b2a652f"},
+    {file = "py_gfm-2.0.0-py2.py3-none-any.whl", hash = "sha256:c49f43b584e15bdbe569141c92aefc00542289b6d88d95b38117e3359a35cdfe"},
+]
+
+[package.dependencies]
+markdown = ">=3.3,<4"
+
+[[package]]
 name = "pyarrow"
 version = "13.0.0"
 description = "Python library for Apache Arrow"
@@ -2065,4 +2079,4 @@ testing = ["big-O", "jaraco.functools", "jaraco.itertools", "more-itertools", "p
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10"
-content-hash = "859835b8b088c4010445026e26669c4c0e122231b7f8cf1423c13c6b5745d34d"
+content-hash = "d6901c88691e1f7737b148370b04b249a865c6f1ef2e076949eb4953026c76a2"

@@ -1,11 +1,13 @@
 """Generic types used in output diffing."""
+from abc import ABC, abstractmethod
 from asyncio import ALL_COMPLETED
+from enum import IntEnum
 from functools import total_ordering
 from io import StringIO
 import logging
 import threading
 import traceback
-from typing import Iterator, Protocol
+from typing import Iterator
 
 from pydantic import BaseModel
 import concurrent.futures
@@ -41,11 +43,12 @@ class TypeDef(BaseModel):
 
 
 # TODO(rousik): add the following, when useful.
-# class ReportSeverity(IntEnum):
-#     """Indicates the severity of a given report."""
-#     WARNING = 1
-#     ERROR = 2
-
+class ReportSeverity(IntEnum):
+     """Indicates the severity of a given report."""
+     INFO = 0
+     WARNING = 1
+     ERROR = 2
+     EXCEPTION = 3
 
 # class ReportBlock(BaseModel):
 #     """Represents single block of data that is part of the report."""
@@ -58,6 +61,7 @@ class AnalysisReport(BaseModel):
     object_path: list[TypeDef]
     title: str = ""
     markdown: str = ""
+    severity: ReportSeverity = ReportSeverity.ERROR
     # TODO(rousik): analysis should be associated with object_path. Unclear
     # whether this should be part of the report, or attached to the object
     # by the TaskQueue.
@@ -67,18 +71,7 @@ class AnalysisReport(BaseModel):
         return bool(self.markdown)
 
 
-class Analyzer(Protocol):
-    """Defines API for analyzers."""
-    def execute(task_queue: "TaskQueue") -> AnalysisReport:
-        """Runs the analysis and returns the report.
-        
-        Args:
-          task_queue: task queue to push sub-analyses into.
-
-        """
-        ...
-
-class GenericAnalyzer(BaseModel):
+class Analyzer(BaseModel, ABC):
     """Represents the common ancestor for the analyzers.
     
     Every analyzer instance is associated with the object
@@ -87,10 +80,21 @@ class GenericAnalyzer(BaseModel):
     """
     object_path: list[TypeDef]
 
+    def get_path(self) -> list[TypeDef]:
+        """Returns object path associated with this analyzer."""
+        return list(self.object_path)
+    
+    def get_str_path(self) -> str:
+        """Returns object path represented as a string."""
+        return "/".join(repr(p) for p in self.object_path)
+    
     def extend_path(self, child: TypeDef) -> list[TypeDef]:
         """Returns object path extended by the `child`."""
         return self.object_path + [child]
-
+    
+    @abstractmethod
+    def execute(self, task_queue: "TaskQueue") -> AnalysisReport:
+        """Runs the analysis and returns the report."""
 
 class TaskQueue:
     """Thread pool backed executor for diff evaluation."""
@@ -146,15 +150,18 @@ class TaskQueue:
                 try:
                     yield fut.result()
                 except Exception as e:
-                    str_path = "/".join(repr(p) for p in analyzer.object_path)
-                    error_title = f"{analyzer.__class__.__name__} failed on {str_path}"
+                    spath = analyzer.get_str_path()
+                    error_title = f"{analyzer.__class__.__name__} failed on {spath}"
                     if not catch_exceptions:
                         raise RuntimeError(error_title) from e
+                    logger.warning(f"Analyzer {analyzer.__class__.__name__} failed on {spath}: {repr(e)}")
+
                     # Otherwise, render exception as markdown.
                     yield AnalysisReport(
                         object_path=analyzer.object_path,
                         title=f"## {error_title}",
-                        markdown=f"```\n{traceback.format_exc()}\n```",
+                        markdown=f"\n```\n{traceback.format_exc()}\n```\n",
+                        severity=ReportSeverity.EXCEPTION,
                     )
      
     def wait(self):
@@ -167,7 +174,7 @@ class TaskQueue:
         md = StringIO()
         for rep in reports:
             if rep.has_changes():
-                md.write(f"{rep.title}\n")
+                md.write(f"\n{rep.title}\n")
                 md.write(rep.markdown)
         return md.getvalue()
      

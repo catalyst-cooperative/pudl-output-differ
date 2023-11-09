@@ -9,7 +9,7 @@ import fsspec
 from pudl_output_differ.sqlite import Database, SQLiteAnalyzer
 
 from pudl_output_differ.types import (
-    AnalysisReport, GenericAnalyzer, KeySetDiff, TaskQueue
+    AnalysisReport, Analyzer, KeySetDiff, TaskQueue
 )
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ def is_remote(dir: str) -> bool:
     return "gcs" in fs.protocol
 
 
-class DirectoryAnalyzer(GenericAnalyzer):
+class DirectoryAnalyzer(Analyzer):
     """Compares two directories for files."""
     left_path: str
     right_path: str

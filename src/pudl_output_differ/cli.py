@@ -24,6 +24,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry import trace
+from mdx_gfm import GithubFlavoredMarkdownExtension
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -171,7 +172,7 @@ def main() -> int:
     if args.html_report:
         md = task_queue.to_markdown(catch_exceptions=True)
         with open(args.html_report, "w") as f:
-            f.write(markdown.markdown(md))
+            f.write(markdown.markdown(md, extensions=[GithubFlavoredMarkdownExtension()]))
         with open(args.html_report + ".markdown", "w") as f:
             f.write(md)
 

@@ -10,7 +10,7 @@ from sqlalchemy import Connection, Engine, create_engine, inspect, text
 
 from pudl_output_differ.types import (
     AnalysisReport,
-    GenericAnalyzer,
+    Analyzer,
     KeySetDiff,
     TaskQueue,
     TypeDef,
@@ -23,6 +23,8 @@ tracer = trace.get_tracer(__name__)
 REPORT_YEAR_PARTITION = "substr(report_date, 1, 4)"
 
 
+# TODO(rousik): for the sake of unit-testing, we should be passing 
+# these as `settings` to the individual analyzers. 
 class SQLiteSettings(BaseSettings):
     """Default configuration for this module."""
 
@@ -53,14 +55,23 @@ class Table(TypeDef):
     name: str
 
 
-class SQLiteAnalyzer(GenericAnalyzer):
+class SQLiteAnalyzer(Analyzer):
     db_name: str
     left_db_path: str
     right_db_path: str
+    settings: SQLiteSettings = SQLiteSettings()
 
     def list_tables(self, engine: Engine) -> set[str]:
         """Returns set of table names in the database."""
         return set(inspect(engine).get_table_names())
+
+    def should_process_table(self, table_name) -> bool:
+        """Returns True if table should be processed."""
+        if self.settings.sqlite_tables_exclude and table_name in self.settings.sqlite_tables_exclude:
+            return False
+        if not self.settings.sqlite_tables_only:
+            return True
+        return table_name in self.settings.sqlite_tables_only
 
     @tracer.start_as_current_span(name="SQLiteAnalyzer.execute")
     def execute(self, task_queue: TaskQueue) -> AnalysisReport:
@@ -78,21 +89,9 @@ class SQLiteAnalyzer(GenericAnalyzer):
             entity="tables",
         )
         for table_name in sorted(tables_diff.shared):
-            settings = SQLiteSettings()
-            if (
-                settings.sqlite_tables_exclude
-                and table_name in settings.sqlite_tables_exclude
-            ):
+            if not self.should_process_table(table_name):
                 logger.debug(
-                    f"Table {table_name} skipped due to config exclusion via sqlite_tables_exclude."
-                )
-                continue
-            if (
-                settings.sqlite_tables_only
-                and table_name not in settings.sqlite_tables_only
-            ):
-                logger.debug(
-                    f"Table {table_name} skipped due to not in the list of sqlite_tables_only."
+                    f"Table {table_name} skipped due to config exclusion."
                 )
                 continue
 
@@ -112,7 +111,7 @@ class SQLiteAnalyzer(GenericAnalyzer):
         )
 
 
-class TableAnalyzer(GenericAnalyzer):
+class TableAnalyzer(Analyzer):
     """Analyzes contents of a single sqlite table."""
 
     db_name: str
@@ -120,6 +119,7 @@ class TableAnalyzer(GenericAnalyzer):
     right_db_path: str
     table_name: str
     partition_key: str = ""
+    settings: SQLiteSettings = SQLiteSettings()
 
     def get_pk_columns(self, engine: Engine) -> list[str]:
         """Returns list of primary key columns."""
@@ -139,7 +139,7 @@ class TableAnalyzer(GenericAnalyzer):
 
         Returns the partition function, or None if this table is not partitioned.
         """
-        return SQLiteSettings().partitioning_schema.get(self.table_name, None)
+        return self.settings.partitioning_schema.get(self.table_name, None)
 
     def is_partitioned_table(self) -> bool:
         """Returns true if this table should be partitioned."""
@@ -159,12 +159,11 @@ class TableAnalyzer(GenericAnalyzer):
             f"SELECT {part_func} AS partition_key, COUNT(*) AS num_rows FROM {self.table_name} GROUP BY partition_key",
             conn,
         )
-        partitions = {r["partition_key"]: r["num_rows"] for _, r in df.iterrows()}
-        if "" in partitions:
-            raise AssertionError(
-                f"Empty partition key found for table {self.table_name}"
-            )
-        return partitions
+        raw_partitions = {r["partition_key"]: r["num_rows"] for _, r in df.iterrows()}
+        if None in raw_partitions:
+            logger.warning(f"Empty partition key found for table {self.db_name}/{self.table_name}")
+
+        return {str(pk): num_rows for pk, num_rows in raw_partitions.items() if pk is not None}
 
     @tracer.start_as_current_span("split_to_partitioned_tasks")
     def split_to_partitioned_tasks(
@@ -196,18 +195,6 @@ class TableAnalyzer(GenericAnalyzer):
             f"Table {self.table_name} splits into {len(lparts)} partitions, with ~{avg_rows} rows per partition."
         )
 
-        if None in lparts:
-            logger.error(
-                f"Left side of {self.table_name} contains null partition keys."
-            )
-            del lparts[None]
-
-        if None in rparts:
-            logger.error(
-                f"Right side of {self.table_name} contains null partition keys."
-            )
-            del rparts[None]
-
         logger.debug(f"partitions: {lparts}, {rparts}")
         partition_diff = KeySetDiff.from_sets(
             left=set(lparts),
@@ -216,9 +203,6 @@ class TableAnalyzer(GenericAnalyzer):
         )
 
         for partition_key in partition_diff.shared:
-            logger.debug(
-                f"Submitting task for partition of {self.table_name}: {partition_key}"
-            )
             task_queue.put(
                 TableAnalyzer(
                     object_path=self.object_path,
@@ -227,6 +211,7 @@ class TableAnalyzer(GenericAnalyzer):
                     db_name=self.db_name,
                     table_name=self.table_name,
                     partition_key=partition_key,
+                    settings=self.settings,
                 )
             )
         md = StringIO()
@@ -322,19 +307,21 @@ class TableAnalyzer(GenericAnalyzer):
         If partition_key is set on this instance, it will use it to filter out the records
         that will be loaded.
         """
-        if not self.is_partitioned_table():
-            return pd.read_sql_table(
-                self.table_name, conn, columns=columns, index_col=index_columns
-            )
+        
+        constraint = ""
+        query_params = {}
+        if self.is_partitioned_table():
+            constraint = f"WHERE {self.get_partition_func()} = :partition_key"
+            query_params["partition_key"] = self.partition_key
 
         selector = "*"
         if columns:
             selector = ", ".join(columns)
 
         sql = text(
-            f"SELECT {selector} FROM {self.table_name} WHERE {self.get_partition_func()} = :partition_key"
+            f"SELECT {selector} FROM {self.table_name} {constraint}"
         )
-        df = pd.read_sql_query(sql, conn, params={"partition_key": self.partition_key})
+        df = pd.read_sql_query(sql, conn, params=query_params)
         if index_columns:
             df = df.set_index(index_columns)
         return df
@@ -360,9 +347,11 @@ class TableAnalyzer(GenericAnalyzer):
         """
         md = StringIO()
         overlap_index = None
-        ldf = None
-        rdf = None
+        ldf = pd.DataFrame()
+        rdf = pd.DataFrame()
 
+        # TODO(rousik): following column magic should be extracted to standalone method.
+        # What we need in the end is a list of shared and shared pk columns.
         lcols = self.get_columns(ldb.engine)
         rcols = self.get_columns(rdb.engine)
 
@@ -397,16 +386,16 @@ class TableAnalyzer(GenericAnalyzer):
             )
             pk_cols = pk_cols_filtered
 
-        ldf = None
-        rdf = None
+        ldf: pd.DataFrame = pd.DataFrame()
+        rdf: pd.DataFrame = pd.DataFrame()
 
-        if SQLiteSettings().single_pass_pk_comparison:
+        if self.settings.single_pass_pk_comparison:
             ldf = self.get_records(ldb, columns=cols_intact, index_columns=pk_cols)
-            rdf = self.get_records(ldb, columns=cols_intact, index_columns=pk_cols)
+            rdf = self.get_records(rdb, columns=cols_intact, index_columns=pk_cols)
 
         with tracer.start_as_current_span("compare_primary_keys"):
             # TODO(rousik): fetch the primary key columns, filtered by the partition if present.
-            if not SQLiteSettings().single_pass_pk_comparison:
+            if not self.settings.single_pass_pk_comparison:
                 with tracer.start_as_current_span("load_pk_dataframes"):
                     ldf = self.get_records(ldb, columns=pk_cols, index_columns=pk_cols)
                     rdf = self.get_records(rdb, columns=pk_cols, index_columns=pk_cols)
@@ -436,7 +425,7 @@ class TableAnalyzer(GenericAnalyzer):
 
         with tracer.start_as_current_span("compare_overlapping_rows") as sp:
             sp.set_attribute("num_rows", len(overlap_index))
-            if SQLiteSettings().single_pass_pk_comparison:
+            if self.settings.single_pass_pk_comparison:
                 ldf = ldf.loc[overlap_index]
                 rdf = rdf.loc[overlap_index]
             else:
@@ -454,8 +443,10 @@ class TableAnalyzer(GenericAnalyzer):
                 md.write(f"* changed {rows_changed} rows ({pct_change:.2f}% change)\n")
 
                 changes_per_column = (~diff_rows.isna()).groupby(axis=1, level=0).any().sum()
-                md.write("\nNumber of changes detected per column:\n")
+                # TODO(rousik): assign column names: column_name, rows_changed
+                md.write("\nNumber of changes detected per column:\n\n")
                 md.write(changes_per_column.to_markdown())
+                md.write("\n")
 
         title = f"## Table {self.db_name}/{self.table_name} rows"
         if self.partition_key:
