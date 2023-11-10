@@ -30,7 +30,15 @@ def make_temp_db(sql_script: str) -> Any:
 
 class LiveTest(unittest.TestCase):
     TABLES_TO_TEST = [
-        "plant_parts_eia",
+        "boiler_fuel_eia923",
+        "denorm_boiler_fuel_eia923",
+        "denorm_boiler_fuel_monthly_eia923",
+        "denorm_boiler_fuel_yearly_eia923",
+        "denorm_generation_fuel_combined_monthly_eia923",
+        "denorm_generation_fuel_combined_yearly_eia923",
+        "denorm_generation_monthly_eia923",
+        "denorm_generation_yearly_eia923",
+        "denorm_plants_utilities_eia",
     ]
     def setUp(self):
         """Show all diffs."""

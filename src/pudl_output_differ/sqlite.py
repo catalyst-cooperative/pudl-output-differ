@@ -54,6 +54,10 @@ class Table(TypeDef):
 
     name: str
 
+class Partition(TypeDef):
+    """Represents partition of a table."""
+    pk: str
+
 
 class SQLiteAnalyzer(Analyzer):
     db_name: str
@@ -205,7 +209,7 @@ class TableAnalyzer(Analyzer):
         for partition_key in partition_diff.shared:
             task_queue.put(
                 TableAnalyzer(
-                    object_path=self.object_path,
+                    object_path=self.extend_path(Partition(pk=partition_key)),
                     left_db_path=self.left_db_path,
                     right_db_path=self.right_db_path,
                     db_name=self.db_name,
@@ -276,7 +280,7 @@ class TableAnalyzer(Analyzer):
             pct_change = float(abs(lrows - rrows) * 100) / lrows
             return AnalysisReport(
                 object_path=self.object_path,
-                title=f"## {self.db_name}/{self.table_name} rows",
+                title=f"## Table {self.db_name}/{self.table_name} rows",
                 markdown=f" * removed {lrows - rrows} rows ({pct_change:.2f}% change)",
             )
         elif rrows > lrows:
@@ -288,7 +292,7 @@ class TableAnalyzer(Analyzer):
 
             return AnalysisReport(
                 object_path=self.object_path,
-                title=f"## {self.db_name}/{self.table_name} rows",
+                title=f"## Table {self.db_name}/{self.table_name} rows",
                 markdown=msg,
             )
 
@@ -299,6 +303,7 @@ class TableAnalyzer(Analyzer):
         # The following is empty report with no content.
         return AnalysisReport(object_path=self.object_path)
 
+    @tracer.start_as_current_span("get_records")
     def get_records(
         self, conn: Connection, columns: list[str] = [], index_columns: list[str] = []
     ) -> pd.DataFrame:
@@ -307,7 +312,15 @@ class TableAnalyzer(Analyzer):
         If partition_key is set on this instance, it will use it to filter out the records
         that will be loaded.
         """
-        
+        trace.get_current_span().set_attributes(
+            {
+                "db_name": self.db_name,
+                "table_name": self.table_name,
+                "columns": sorted(columns),
+                "index_columns": sorted(index_columns),
+            }
+        )
+
         constraint = ""
         query_params = {}
         if self.is_partitioned_table():
@@ -430,10 +443,10 @@ class TableAnalyzer(Analyzer):
                 rdf = rdf.loc[overlap_index]
             else:
                 with tracer.start_as_current_span("load_overlapping_rows"):
-                    ldf = self.get_records(ldb, index_columns=pk_cols)
+                    ldf = self.get_records(ldb, columns=cols_intact, index_columns=pk_cols)
                     ldf = ldf.loc[overlap_index]
 
-                    rdf = self.get_records(rdb, index_columns=pk_cols)
+                    rdf = self.get_records(rdb, columns=cols_intact, index_columns=pk_cols)
                     rdf = rdf.loc[overlap_index]
 
             diff_rows = ldf.compare(rdf, result_names=("left", "right"))
@@ -442,10 +455,14 @@ class TableAnalyzer(Analyzer):
                 pct_change = float(rows_changed) * 100 / orig_row_count
                 md.write(f"* changed {rows_changed} rows ({pct_change:.2f}% change)\n")
 
-                changes_per_column = (~diff_rows.isna()).groupby(axis=1, level=0).any().sum()
+                # calculate number of rows that have changes in a particular column
+                changes_per_col = (~diff_rows.T.isna()).groupby(level=0).any().T.sum()
+                changes_per_col = changes_per_col.to_frame().reset_index()
+                changes_per_col.columns = ["column_name", "num_rows"]
+
                 # TODO(rousik): assign column names: column_name, rows_changed
                 md.write("\nNumber of changes detected per column:\n\n")
-                md.write(changes_per_column.to_markdown())
+                md.write(changes_per_col.to_markdown())
                 md.write("\n")
 
         title = f"## Table {self.db_name}/{self.table_name} rows"
