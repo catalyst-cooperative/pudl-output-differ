@@ -18,7 +18,16 @@ pyarrow = "^13.0.0"
 opentelemetry-api = "^1.20.0"
 opentelemetry-sdk = "^1.20.0"
 apsw = "^3.43.1.0"
+github = "^1.2.7"
+pygithub = "^2.1.1"
+tabulate = "^0.9.0"
+opentelemetry-exporter-otlp-proto-grpc = "^1.20.0"
+markdown = "^3.5.1"
+py-gfm = "^2.0.0"
 
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.3"
 
 [build-system]
 requires = ["poetry-core"]
