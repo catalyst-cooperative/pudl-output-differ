@@ -7,4 +7,4 @@ COPY README.md /app
 COPY ./src /app/src
 RUN poetry config virtualenvs.create false
 RUN poetry install --only main
-ENTRYPOINT ["poetry", "run", "python", "-m", "pudl_output_differ.main"]
+ENTRYPOINT ["poetry", "run", "diff"] 

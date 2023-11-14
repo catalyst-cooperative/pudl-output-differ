@@ -6,6 +6,9 @@ authors = ["Jan Rous <rousik@gmail.com>"]
 readme = "README.md"
 packages = [{include = "pudl_output_differ", from = "src"}]
 
+[tool.poetry.scripts]
+diff = "pudl_output_differ.cli:main"
+
 [tool.poetry.dependencies]
 python = "^3.10"
 pydantic = "^2.3.0"
