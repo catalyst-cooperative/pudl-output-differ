@@ -6,7 +6,8 @@ import unittest
 
 from sqlalchemy import create_engine
 from pudl_output_differ import sqlite
-from pudl_output_differ.types import TaskQueue
+from pudl_output_differ.task_queue import TaskQueue
+from pudl_output_differ.types import ObjectPath
 
 # TODO(rousik): we could set up temporary sqlite databases for testing as
 # part of the test cases.
@@ -42,12 +43,14 @@ class LiveTest(unittest.TestCase):
     ]
     def setUp(self):
         """Show all diffs."""
+        self.skipTest("This test is too slow for CI or non local development.")
+
         self.maxDiff = None
         self.left_db_path = "/Users/rousik/pudl-data/fast-samples/left/pudl.sqlite"
         self.right_db_path = "/Users/rousik/pudl-data/fast-samples/right/pudl.sqlite"
         self.left_db = create_engine("sqlite:////Users/rousik/pudl-data/fast-samples/left/pudl.sqlite")
         self.right_db = create_engine("sqlite:////Users/rousik/pudl-data/fast-samples/right/pudl.sqlite")
-
+        self.obj_path = ObjectPath().extend(sqlite.Database(name="pudl.sqlite"))
     # TODO(rousik): Further tests here could involve
     # 1. testing sharding of the tables (submitting TableEvaluation tasks with the right
     # partition keys)
@@ -55,10 +58,11 @@ class LiveTest(unittest.TestCase):
 
     # TODO(rousik): we could invoke compare_pk_table() directly to see
     # why there are differences in the two runs.
+
     def test_two_evaluation_modes(self):
         """Make sure that running one-way and two-way comparison yields same results."""
         two_way = sqlite.TableAnalyzer(
-            object_path=[],
+            object_path=self.obj_path,
             db_name="pudl.sqlite",
             table_name="coalmine_eia923",
             left_db_path=self.left_db_path,
@@ -66,7 +70,7 @@ class LiveTest(unittest.TestCase):
             settings=sqlite.SQLiteSettings(single_pass_pk_comparison=False),
         )
         one_way = sqlite.TableAnalyzer(
-            object_path=[],
+            object_path=self.obj_path,
             db_name="pudl.sqlite",
             table_name="coalmine_eia923",
             left_db_path=self.left_db_path,
@@ -85,7 +89,7 @@ class LiveTest(unittest.TestCase):
             task_queue = TaskQueue(max_workers=1)
             task_queue.put(
                 sqlite.TableAnalyzer(
-                    object_path=[],
+                    object_path=self.obj_path,
                     db_name="pudl.sqlite",
                     table_name=table_name,
                     left_db_path="/Users/rousik/pudl-data/fast-samples/left/pudl.sqlite",
@@ -137,7 +141,7 @@ class TestSQLiteAnalyzer(unittest.TestCase):
         task_queue = TaskQueue(max_workers=1)
         task_queue.put(
             sqlite.SQLiteAnalyzer(
-                object_path=[],
+                object_path=ObjectPath(),
                 db_name="test",
                 left_db_path=left.name,
                 right_db_path=right.name,
@@ -145,14 +149,20 @@ class TestSQLiteAnalyzer(unittest.TestCase):
         )
         self.assertEqual(
             dedent(
-                """\
+                """
             ## Table test/foo rows
             * added 1 rows (25.00% change)
             * removed 1 rows (25.00% change)
             * changed 1 rows (25.00% change)
+
+            Number of changes detected per column:
+
+            |    | column_name   |   num_rows |
+            |---:|:--------------|-----------:|
+            |  0 | quantity      |          1 |
             """
             ),
-            task_queue.to_markdown(),
+            dedent(task_queue.to_markdown()),
         )
 
 

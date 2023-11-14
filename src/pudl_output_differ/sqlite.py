@@ -12,7 +12,7 @@ from pudl_output_differ.types import (
     AnalysisReport,
     Analyzer,
     KeySetDiff,
-    TaskQueue,
+    TaskQueueInterface,
     TypeDef,
 )
 
@@ -45,8 +45,10 @@ class SQLiteSettings(BaseSettings):
 
 class Database(TypeDef):
     """Represents a database."""
-
     name: str
+
+    def __str__(self):
+        return f"Database({self.name})"
 
 
 class Table(TypeDef):
@@ -54,9 +56,16 @@ class Table(TypeDef):
 
     name: str
 
+    def __str__(self):
+        return f"Table({self.name})"
+
+
 class Partition(TypeDef):
     """Represents partition of a table."""
     pk: str
+
+    def __str__(self):
+        return f"Partition(key:{self.pk})"
 
 
 class SQLiteAnalyzer(Analyzer):
@@ -78,7 +87,7 @@ class SQLiteAnalyzer(Analyzer):
         return table_name in self.settings.sqlite_tables_only
 
     @tracer.start_as_current_span(name="SQLiteAnalyzer.execute")
-    def execute(self, task_queue: TaskQueue) -> AnalysisReport:
+    def execute(self, task_queue: TaskQueueInterface) -> AnalysisReport:
         """Analyze tables and their schemas."""
         sp = trace.get_current_span()
         sp.set_attribute("db_name", self.db_name)
@@ -101,7 +110,7 @@ class SQLiteAnalyzer(Analyzer):
 
             task_queue.put(
                 TableAnalyzer(
-                    object_path=self.extend_path(Table(name=table_name)),
+                    object_path=self.object_path.extend(Table(name=table_name)),
                     left_db_path=self.left_db_path,
                     right_db_path=self.right_db_path,
                     db_name=self.db_name,
@@ -171,7 +180,7 @@ class TableAnalyzer(Analyzer):
 
     @tracer.start_as_current_span("split_to_partitioned_tasks")
     def split_to_partitioned_tasks(
-        self, task_queue: TaskQueue, lconn: Connection, rconn: Connection
+        self, task_queue: TaskQueueInterface, lconn: Connection, rconn: Connection
     ) -> AnalysisReport:
         """Splits table analysis into partitioned tasks.
 
@@ -209,7 +218,7 @@ class TableAnalyzer(Analyzer):
         for partition_key in partition_diff.shared:
             task_queue.put(
                 TableAnalyzer(
-                    object_path=self.extend_path(Partition(pk=partition_key)),
+                    object_path=self.object_path.extend(Partition(pk=partition_key)),
                     left_db_path=self.left_db_path,
                     right_db_path=self.right_db_path,
                     db_name=self.db_name,
@@ -234,7 +243,7 @@ class TableAnalyzer(Analyzer):
         )
 
     @tracer.start_as_current_span(name="TableAnalyzer.execute")
-    def execute(self, task_queue: TaskQueue) -> AnalysisReport:
+    def execute(self, task_queue: TaskQueueInterface) -> AnalysisReport:
         """Analyze tables and their schemas."""
         sp = trace.get_current_span()
         sp.set_attribute("db_name", self.db_name)

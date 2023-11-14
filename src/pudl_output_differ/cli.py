@@ -18,13 +18,15 @@ import tempfile
 import markdown
 
 from pudl_output_differ.files import DirectoryAnalyzer, is_remote
-from pudl_output_differ.types import TaskQueue
+from pudl_output_differ.task_queue import TaskQueue
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry import trace
 from mdx_gfm import GithubFlavoredMarkdownExtension
+
+from pudl_output_differ.types import ObjectPath
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -161,7 +163,7 @@ def main() -> int:
 
         task_queue.put(
             DirectoryAnalyzer(
-                object_path=[],
+                object_path=ObjectPath(),
                 left_path=lpath,
                 right_path=rpath,
                 local_cache_root=args.cache_dir,
