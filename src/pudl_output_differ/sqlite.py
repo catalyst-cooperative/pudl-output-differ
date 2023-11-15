@@ -86,11 +86,10 @@ class SQLiteAnalyzer(Analyzer):
             return True
         return table_name in self.settings.sqlite_tables_only
 
-    @tracer.start_as_current_span(name="SQLiteAnalyzer.execute")
     def execute(self, task_queue: TaskQueueInterface) -> AnalysisReport:
         """Analyze tables and their schemas."""
-        sp = trace.get_current_span()
-        sp.set_attribute("db_name", self.db_name)
+        trace.get_current_span().set_attribute("db_name", self.db_name)
+
         ldb = create_engine(f"sqlite:///{self.left_db_path}")
         rdb = create_engine(f"sqlite:///{self.right_db_path}")
 
@@ -242,7 +241,6 @@ class TableAnalyzer(Analyzer):
             markdown=md.getvalue(),
         )
 
-    @tracer.start_as_current_span(name="TableAnalyzer.execute")
     def execute(self, task_queue: TaskQueueInterface) -> AnalysisReport:
         """Analyze tables and their schemas."""
         sp = trace.get_current_span()

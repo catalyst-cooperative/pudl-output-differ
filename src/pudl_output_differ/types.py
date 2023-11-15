@@ -72,6 +72,14 @@ class ObjectPath(BaseModel):
         """Returns object path represented as a string."""
         return "/".join(str(p) for p in self.path)
     
+    def get_first(self, cls: type[TypeDef]) -> TypeDef | None:
+        """Retrieves first node of the given type from the path."""
+        for node in self.path:
+            if isinstance(node, cls):
+                return node
+        return None
+    
+    
     @staticmethod
     def from_nodes(*nodes: TypeDef) -> "ObjectPath":
         """Converts list of TypeDef instances to a path instance."""
