@@ -9,7 +9,7 @@ import fsspec
 from pudl_output_differ.sqlite import Database, SQLiteAnalyzer
 
 from pudl_output_differ.types import (
-    AnalysisReport, Analyzer, KeySetDiff, TaskQueue
+    AnalysisReport, Analyzer, KeySetDiff, TaskQueueInterface
 )
 
 logger = logging.getLogger(__name__)
@@ -82,17 +82,19 @@ class DirectoryAnalyzer(Analyzer):
         # fs to detrmine local path only when needed.
         return f.name
 
-    # TODO(rousik): passing parents this way is a bit clunky, but acceptable.
-    @tracer.start_as_current_span(name="DirectoryAnalyzer")
-    def execute(self, task_queue: TaskQueue) -> AnalysisReport:
+    def execute(self, task_queue: TaskQueueInterface) -> AnalysisReport:
         """Computes diff between two output directories.
 
         Files on the left and right are compared for presence, children
         are deeper-layer analyzers for specific file types that are supported.
         """
-        sp = trace.get_current_span()
-        sp.set_attribute("left_path", self.left_path)
-        sp.set_attribute("right_path", self.right_path)
+        trace.get_current_span().set_attributes(
+            {
+                "left_path": self.left_path,
+                "right_path": self.right_path,
+            }
+        )
+
         lfs = self.get_files(self.left_path)
         rfs = self.get_files(self.right_path)
 
@@ -106,8 +108,8 @@ class DirectoryAnalyzer(Analyzer):
 
                 task_queue.put(
                     SQLiteAnalyzer(
-                        object_path = [Database(name=shared_file)],
-                        db_name = shared_file,
+                        object_path=self.object_path.extend(Database(name=shared_file)),
+                        db_name=shared_file,
                         left_db_path=left_path,
                         right_db_path=right_path,
                     )
@@ -115,7 +117,7 @@ class DirectoryAnalyzer(Analyzer):
             # TODO(rousik): other file formats are: json, parquet, yml.
 
         return AnalysisReport(
-            object_path = [],
-            title = "# Files",
-            markdown = file_diff.markdown(long_format=True),
+            object_path=self.object_path,
+            title= "# Files",
+            markdown=file_diff.markdown(long_format=True),
         )

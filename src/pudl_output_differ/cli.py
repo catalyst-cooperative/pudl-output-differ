@@ -18,13 +18,15 @@ import tempfile
 import markdown
 
 from pudl_output_differ.files import DirectoryAnalyzer, is_remote
-from pudl_output_differ.types import TaskQueue
+from pudl_output_differ.task_queue import TaskQueue
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry import trace
 from mdx_gfm import GithubFlavoredMarkdownExtension
+
+from pudl_output_differ.types import ObjectPath
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -161,37 +163,18 @@ def main() -> int:
 
         task_queue.put(
             DirectoryAnalyzer(
-                object_path=[],
+                object_path=ObjectPath(),
                 left_path=lpath,
                 right_path=rpath,
                 local_cache_root=args.cache_dir,
                 filename_filter=args.filename_filter,
             )
         )
-        reports = 0
-        nonempty_reports = 0
-        for analysis in task_queue.iter_analyses(
-            catch_exceptions=args.catch_exceptions
-        ):
-            reports += 1
-            # TODO(rousik): it would be good if AnalysisReport contained metadata
-            # identifyng the analyzer that produced it. Perhaps we could use
-            # wrapper that will contain both the analysis, as well as the analyzer
-            # metadata, e.g.:
-            # - object_path
-            # - instance that produced it (config)
-            # - possible runtime exception information (so that we can distinguish)
-            # Analysis itself could have severity (ERROR, WARNING) to indicate
-            # whether the problem is serious or not.
-            if analysis.markdown:
-                nonempty_reports += 1
-                print(analysis.title)
-                print(analysis.markdown)
-                print()
-        logger.info(f"Total {reports} reports, with {nonempty_reports} nonempty.")
+        task_queue.run()
+        task_queue.wait()
 
     if args.html_report:
-        md = task_queue.to_markdown(catch_exceptions=True)
+        md = task_queue.to_markdown()
         with open(args.html_report, "w") as f:
             f.write(MARKDOWN_CSS_STYLE)
             f.write('<article class="markdown-body">')
