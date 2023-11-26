@@ -152,7 +152,7 @@ class TaskQueue:
                     except Exception:
                         cur_task.state = ExecutionState.FAILED
                         # Umph, the analyzer failed; log the problem and make synthetic report.
-                        error_title = f"{cur_task.analyzer.__class__.__name__} failed on {next_analysis.object_path}"
+                        error_title = f"{cur_task.analyzer.__class__.__name__} failed on {cur_task.object_path}"
                         cur_task.report = AnalysisReport(
                             object_path=cur_task.object_path,
                             title=f"## {error_title}",
@@ -176,10 +176,17 @@ class TaskQueue:
             if token is not None:
                 context.detach(token)
 
-    def run(self):
-        """Kicks off analysis_runners in the thread pool."""
+    def run(self, wait: bool=True):
+        """Kicks off analysis_runners in the thread pool.
+
+        Args:
+            wait: if True, this method will block until all tasks are completed.
+
+        """
         for i in range(self.max_workers):
             self.runners.append(self.executor.submit(self.analysis_runner))
+        if wait:
+            self.wait()
 
     def put(self, analyzer: Analyzer):
         """Add evaluator to the execution queue."""
@@ -192,8 +199,14 @@ class TaskQueue:
             # Do we need to kick of analyzer threads/tasks?
     
     def wait(self):
-        """Awaits until all tasks are completed."""
-        concurrent.futures.wait(self.runners, return_when="ALL_COMPLETED")        
+        """Awaits until all tasks are completed.
+        """
+        done_tasks, _ = concurrent.futures.wait(self.runners, return_when="ALL_COMPLETED")
+        for dt in done_tasks:
+            # If any of the runners failed, the following will raise the exception that
+            # caused the failure.
+            # We do not gracefully deal with worker failures so lets just fail hard.
+            dt.result()
 
     def to_markdown(self) -> str:
         """Convert all reports to markdown, sorting them by their object_paths."""

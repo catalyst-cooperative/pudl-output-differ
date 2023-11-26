@@ -147,6 +147,7 @@ class TestSQLiteAnalyzer(unittest.TestCase):
                 right_db_path=right.name,
             )
         )
+        task_queue.run()
         self.assertEqual(
             dedent(
                 """
