@@ -1,9 +1,50 @@
-# """Module for comparing contents of parquet files."""
+"""Module for comparing contents of parquet files."""
 
-# import logging
-# from pudl_output_differ.sqlite import RowCountDiff
-# from pudl_output_differ.types import DiffEvaluatorBase, DiffTreeNode, KeySetDiff, TaskQueue
-# import pyarrow.parquet as pq
+from io import StringIO
+import logging
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pudl_output_differ.types import AnalysisReport, Analyzer, TaskQueueInterface, TypeDef
+import pyarrow.parquet as pq
+
+logger = logging.getLogger(__name__)
+
+
+class ParquetSettings(BaseSettings):
+    """Default configuration for the parquet analysis."""
+    model_config = SettingsConfigDict(env_prefix="diff_")
+
+
+class ParquetFile(TypeDef):
+    """Represents parquet file."""
+    name: str
+
+    def __str__(self):
+        return f"ParquetFile({self.name})"
+
+
+class ParquetAnalyzer(Analyzer):
+    name: str
+    left_path: str
+    right_path: str
+    # TODO(rousik): add settings once we know how to tune this
+
+    def execute(self, task_queue: TaskQueueInterface) -> AnalysisReport:
+        md = StringIO()
+        lmeta = pq.read_metadata(self.left_path)
+        rmeta = pq.read_metadata(self.right_path)
+        if not lmeta.schema.equals(rmeta.schema):
+            md.write("* parquet schemas are different.\n")
+            # TODO(rousik): add comparison of schema columns
+
+        # TODO(rousik): try loading the contents of the parquet files
+        # for comparison. This will be similar to sqlite and may reuse
+        # the same pandas machinery.
+        return AnalysisReport(
+            object_path=self.object_path,
+            title=f"## Parquet file {self.name}",
+            markdown=md.getvalue()
+        )
 
 
 # logger = logging.getLogger(__name__)

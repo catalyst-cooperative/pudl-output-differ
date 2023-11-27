@@ -1,12 +1,15 @@
 """Utilities for comparing sqlite databases."""
 
-from io import StringIO
 import logging
+from io import StringIO
 from typing import Optional
+
+import backoff
 import pandas as pd
 from opentelemetry import trace
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import Connection, Engine, create_engine, inspect, text
+from sqlalchemy.exc import OperationalError
 
 from pudl_output_differ.types import (
     AnalysisReport,
@@ -240,6 +243,13 @@ class TableAnalyzer(Analyzer):
             title=f"## Table {self.db_name}/{self.table_name} partitioning",
             markdown=md.getvalue(),
         )
+    
+    @backoff.on_exception(backoff.expo, OperationalError, max_tries=4)
+    def retry_connect(self, engine: Engine) -> Connection:
+        """Connects to the database, retrying on OperationalError."""
+        with tracer.start_as_current_span("connect_sqlite") as sp:
+            sp.set_attribute("db_path", engine.url.render_as_string())
+            return engine.connect()
 
     def execute(self, task_queue: TaskQueueInterface) -> AnalysisReport:
         """Analyze tables and their schemas."""
@@ -249,11 +259,12 @@ class TableAnalyzer(Analyzer):
         if self.partition_key:
             sp.set_attribute("partition_key", self.partition_key)
 
+
         l_db_engine = create_engine(f"sqlite:///{self.left_db_path}")
         r_db_engine = create_engine(f"sqlite:///{self.right_db_path}")
 
-        lconn = l_db_engine.connect()
-        rconn = r_db_engine.connect()
+        lconn = self.retry_connect(l_db_engine)
+        rconn = self.retry_connect(r_db_engine)
 
         # TODO(rousik): test for schema discrepancies here.
         l_pk = self.get_pk_columns(l_db_engine)
@@ -472,7 +483,7 @@ class TableAnalyzer(Analyzer):
                 md.write(changes_per_col.to_markdown())
                 md.write("\n")
 
-        title = f"## Table {self.db_name}/{self.table_name} rows"
+        title = f"## Table {self.db_name}/{self.table_name}"
         if self.partition_key:
             title += f" (partition {self.get_partition_func()}={self.partition_key})"
 

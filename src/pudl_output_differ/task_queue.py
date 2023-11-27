@@ -3,24 +3,26 @@ Implementation of the TaskQueue class that handles parallel execution
 of the outstanding analyses.
 """
 
-from collections import Counter
-from time import sleep
-from enum import IntEnum
-from io import StringIO
+import concurrent.futures
 import logging
 import threading
-import concurrent.futures
 import traceback
+from collections import Counter
+from enum import IntEnum
+from io import StringIO
+from time import sleep
 from uuid import uuid1
 
+from opentelemetry import trace
 from pydantic import UUID1, BaseModel, Field
+
 from pudl_output_differ.sqlite import Database
-
-from pudl_output_differ.types import AnalysisReport, Analyzer, ObjectPath, ReportSeverity
-
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
-from opentelemetry import context, trace
-
+from pudl_output_differ.types import (
+    AnalysisReport,
+    Analyzer,
+    ObjectPath,
+    ReportSeverity,
+)
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -71,14 +73,12 @@ class TaskQueue:
         self.inflight_tasks: dict[UUID1, AnalysisMetadata] = {}
         self.completed_tasks: dict[UUID1, AnalysisMetadata] = {}
         self.runners: list[concurrent.futures.Future] = []
-        self.trace_carrier = {}
-        self.max_db_concurrency = 1
-        TraceContextTextMapPropagator().inject(self.trace_carrier)
-
-    def has_pending_tasks(self):
-        """Returns if any tasks are pending execution."""
+        self.max_db_concurrency = 2
+        
+    def has_unfinished_tasks(self):
+        """Returns true if any tasks are pending or in-flight."""
         with self._lock:
-            return len(self.pending_tasks) > 0
+            return len(self.pending_tasks) + len(self.inflight_tasks) > 0
         
     def get_next_task(self) -> AnalysisMetadata | None:
         """Returns next pending analysis to run.
@@ -115,25 +115,19 @@ class TaskQueue:
         
             return None
     
-    def analysis_runner(self) -> None:
+    @tracer.start_as_current_span("TaskQueue.analysis_runner")
+    def analysis_runner(self, runner_id: str = "") -> None:
         """Runs the analyses in the queue until there are no more pending tasks.
 
         This method is expected to be run multiple times in parallel and process
         the analysis queue until it is empty. It will also collect reports and
         possible runtime exceptions.
         """
-
-        # TODO(rousik): Implement this, this can contain the exception catching code
-        # once and for all. Resulting analyses can be put in the output queue.
-        # Perhaps instead of using ThreadpoolExecutor, we can simply launch bunch
-        # of these runners in parallel based on max_workers flag.
-        token = None
-        if self.trace_carrier:
-            ctx = TraceContextTextMapPropagator().extract(carrier=self.trace_carrier)
-            token = context.attach(ctx)
-        try:
-            # TODO(rousik): wrap this in spans to make it work well.
-            while self.has_pending_tasks():
+        tasks_processed = 0
+        trace.get_current_span().set_attribute("runner_id", runner_id)
+        # TODO(rousik): wrap this in spans to make it work well.
+        while self.has_unfinished_tasks():
+            with tracer.start_as_current_span("select_next_task"):
                 cur_task = self.get_next_task()
                 if cur_task is None:
                     logger.debug("No tasks to run, waiting for more...")
@@ -143,38 +137,35 @@ class TaskQueue:
                     sleep(1)
                     continue
 
-                analyzer_name = cur_task.analyzer.__class__.__name__
+            analyzer_name = cur_task.analyzer.__class__.__name__
+            try:
+                tasks_processed += 1
                 with tracer.start_as_current_span(f"{analyzer_name}.execute") as sp:
                     sp.set_attribute("object_path", str(cur_task.object_path))
-                    try:
-                        cur_task.report = cur_task.analyzer.execute(self)
-                        cur_task.state = ExecutionState.COMPLETED
-                    except Exception:
-                        cur_task.state = ExecutionState.FAILED
-                        # Umph, the analyzer failed; log the problem and make synthetic report.
-                        error_title = f"{cur_task.analyzer.__class__.__name__} failed on {cur_task.object_path}"
-                        cur_task.report = AnalysisReport(
-                            object_path=cur_task.object_path,
-                            title=f"## {error_title}",
-                            markdown=f"\n```\n{traceback.format_exc()}\n```\n",
-                            severity=ReportSeverity.EXCEPTION,
-                        )
-                # Move the analysis to completed state.
-                with self._lock:
-                    self.completed_tasks[cur_task.id] = cur_task
-                    del self.inflight_tasks[cur_task.id]
+                    cur_task.report = cur_task.analyzer.execute(self)
+                    cur_task.state = ExecutionState.COMPLETED
+            except Exception:
+                cur_task.state = ExecutionState.FAILED
+                # Umph, the analyzer failed; log the problem and make synthetic report.
+                error_title = f"{cur_task.analyzer.__class__.__name__} failed on {cur_task.object_path}"
+                cur_task.report = AnalysisReport(
+                    object_path=cur_task.object_path,
+                    title=f"## {error_title}",
+                    markdown=f"\n```\n{traceback.format_exc()}\n```\n",
+                    severity=ReportSeverity.EXCEPTION,
+                )
+            # Move the analysis to completed state.
+            with self._lock:
+                self.completed_tasks[cur_task.id] = cur_task
+                del self.inflight_tasks[cur_task.id]
 
-                    # The following print-as-they-become available should be a debug feature.
-                    # TODO(rousik): It should be possible to turn this functionality off.
-                with self._lock:
-                    if cur_task.report and cur_task.report.has_changes():
-                        print(cur_task.report.title)
-                        print(cur_task.report.markdown)
-
-            logger.info("Queue has no more pending tasks, terminating this runner.")
-        finally:
-            if token is not None:
-                context.detach(token)
+            # The following print-as-they-become available should be a debug feature.
+            # TODO(rousik): It should be possible to turn this functionality off.
+            with self._lock:
+                if cur_task.report and cur_task.report.has_changes():
+                    print(cur_task.report.title)
+                    print(cur_task.report.markdown)
+        logger.info("Runner {runner_id} terminating after {processed_tasks} tasks.")
 
     def run(self, wait: bool=True):
         """Kicks off analysis_runners in the thread pool.
@@ -184,7 +175,7 @@ class TaskQueue:
 
         """
         for i in range(self.max_workers):
-            self.runners.append(self.executor.submit(self.analysis_runner))
+            self.runners.append(self.executor.submit(self.analysis_runner, runner_id=str(i)))
         if wait:
             self.wait()
 

@@ -15,17 +15,17 @@ import shutil
 import sys
 import tempfile
 
+import fsspec
 import markdown
+from mdx_gfm import GithubFlavoredMarkdownExtension
+from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from pudl_output_differ.files import DirectoryAnalyzer, is_remote
 from pudl_output_differ.task_queue import TaskQueue
-from opentelemetry.sdk.resources import SERVICE_NAME, Resource
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry import trace
-from mdx_gfm import GithubFlavoredMarkdownExtension
-
 from pudl_output_differ.types import ObjectPath
 
 logger = logging.getLogger(__name__)
@@ -175,12 +175,12 @@ def main() -> int:
 
     if args.html_report:
         md = task_queue.to_markdown()
-        with open(args.html_report, "w") as f:
+        with fsspec.open(args.html_report, "w") as f:
             f.write(MARKDOWN_CSS_STYLE)
             f.write('<article class="markdown-body">')
             f.write(markdown.markdown(md, extensions=[GithubFlavoredMarkdownExtension()]))
             f.write('</article>')
-        with open(args.html_report + ".markdown", "w") as f:
+        with fsspec.open(args.html_report + ".markdown", "w") as f:
             f.write(md)
 
     # TODO(rousik): for the proper output, sort the

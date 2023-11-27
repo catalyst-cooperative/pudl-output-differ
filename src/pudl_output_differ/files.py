@@ -3,9 +3,11 @@
 from pathlib import Path
 import logging
 import re
+from typing import Counter
 from opentelemetry import trace
 
 import fsspec
+from pudl_output_differ.parquet import ParquetAnalyzer, ParquetFile
 from pudl_output_differ.sqlite import Database, SQLiteAnalyzer
 
 from pudl_output_differ.types import (
@@ -100,6 +102,7 @@ class DirectoryAnalyzer(Analyzer):
 
         file_diff = KeySetDiff.from_sets(set(lfs), set(rfs), entity="files")
 
+        unsupported_formats = Counter()
         for shared_file in file_diff.shared:
             if shared_file.endswith(".sqlite"):
                 # Cache remote files locally
@@ -114,7 +117,24 @@ class DirectoryAnalyzer(Analyzer):
                         right_db_path=right_path,
                     )
                 )
-            # TODO(rousik): other file formats are: json, parquet, yml.
+            elif shared_file.endswith(".parquet"):
+                task_queue.put(
+                    ParquetAnalyzer(
+                        object_path=self.object_path.extend(ParquetFile(name=shared_file)),
+                        name=shared_file,
+                        left_path=lfs[shared_file],
+                        right_path=rfs[shared_file],
+                    )
+                )
+            else:
+                fmt = Path(shared_file).suffix.lstrip(".").strip()
+                if fmt:
+                    unsupported_formats.update([fmt])
+            # TODO(rousik): add support for yml (perhaps sensitive to kinds of yml files we have)
+            # TODO(rousik): add support for json, csv, etc..
+        if unsupported_formats:
+            for fmt, count in unsupported_formats.items():
+                logger.warning(f"Unsupported file format {fmt} found {count} times.")
 
         return AnalysisReport(
             object_path=self.object_path,
