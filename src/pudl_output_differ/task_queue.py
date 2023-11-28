@@ -14,14 +14,15 @@ from time import sleep
 from uuid import uuid1
 
 from opentelemetry import trace
+from progress.bar import Bar
 from pydantic import UUID1, BaseModel, Field
 
 from pudl_output_differ.sqlite import Database
 from pudl_output_differ.types import (
-    AnalysisReport,
     Analyzer,
     ObjectPath,
     ReportSeverity,
+    Result,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,7 +47,7 @@ class AnalysisMetadata(BaseModel):
     id: UUID1 = Field(default_factory=uuid1)
     object_path: ObjectPath
     analyzer: Analyzer
-    report: AnalysisReport | None = None
+    results: list[Result] = []
     state: ExecutionState = ExecutionState.PENDING
     # TODO(rousik): perhaps add field for the traceback of the exception
     # or the exception itself (?); perhaps embedding this in the report is
@@ -74,6 +75,7 @@ class TaskQueue:
         self.completed_tasks: dict[UUID1, AnalysisMetadata] = {}
         self.runners: list[concurrent.futures.Future] = []
         self.max_db_concurrency = 2
+        self.progress_bar = Bar(max=100)
         
     def has_unfinished_tasks(self):
         """Returns true if any tasks are pending or in-flight."""
@@ -142,30 +144,35 @@ class TaskQueue:
                 tasks_processed += 1
                 with tracer.start_as_current_span(f"{analyzer_name}.execute") as sp:
                     sp.set_attribute("object_path", str(cur_task.object_path))
-                    cur_task.report = cur_task.analyzer.execute(self)
+                    cur_task.results = cur_task.analyzer.execute_sync(self)
                     cur_task.state = ExecutionState.COMPLETED
             except Exception:
                 cur_task.state = ExecutionState.FAILED
-                # Umph, the analyzer failed; log the problem and make synthetic report.
-                error_title = f"{cur_task.analyzer.__class__.__name__} failed on {cur_task.object_path}"
-                cur_task.report = AnalysisReport(
-                    object_path=cur_task.object_path,
-                    title=f"## {error_title}",
-                    markdown=f"\n```\n{traceback.format_exc()}\n```\n",
-                    severity=ReportSeverity.EXCEPTION,
+                cur_task.results.append(
+                    Result(
+                        severity=ReportSeverity.EXCEPTION,
+                        markdown=f"\n```\n{traceback.format_exc()}\n```\n",    
+                    )
                 )
             # Move the analysis to completed state.
             with self._lock:
+                self.progress_bar.max = (
+                    len(self.pending_tasks) + 
+                    len(self.inflight_tasks) + 
+                    len(self.completed_tasks)
+                )
+                self.progress_bar.next()
                 self.completed_tasks[cur_task.id] = cur_task
                 del self.inflight_tasks[cur_task.id]
 
             # The following print-as-they-become available should be a debug feature.
             # TODO(rousik): It should be possible to turn this functionality off.
-            with self._lock:
-                if cur_task.report and cur_task.report.has_changes():
-                    print(cur_task.report.title)
-                    print(cur_task.report.markdown)
-        logger.info("Runner {runner_id} terminating after {processed_tasks} tasks.")
+            # with self._lock:
+            #     if cur_task.results:
+            #         print(cur_task.analyzer.get_title())
+            #         for res in cur_task.results:
+            #             print(res.markdown)
+        logger.info(f"Runner {runner_id} terminating after {tasks_processed} tasks.")
 
     def run(self, wait: bool=True):
         """Kicks off analysis_runners in the thread pool.
@@ -204,8 +211,30 @@ class TaskQueue:
         assert len(self.pending_tasks) + len(self.inflight_tasks) == 0
 
         md = StringIO()
-        for task in sorted(self.completed_tasks.values(), key=lambda t: t.object_path):
-            if task.report and task.report.has_changes():
-                md.write(f"\n{task.report.title}\n")
-                md.write(task.report.markdown)
+        md.write("# Summary\n")
+        sorted_tasks = sorted(self.completed_tasks.values(), key=lambda t: t.object_path)
+
+        # Count number of objects and then number of results by severity.
+        by_severity = Counter(
+            [res.severity.name for task in sorted_tasks for res in task.results]
+        )
+        if by_severity:
+            md.write(f"Processed {len(sorted_tasks)} objects. Got {by_severity.total()} results:\n\n")
+            md.write("| Severity | Count |\n")
+            md.write("| -------- | ----- |\n")
+            for sev, cnt in by_severity.most_common():
+                md.write(f"| {sev} | {cnt} |\n")
+
+        # TODO(rousik): We might want to add a summary here, with the following
+        # information:
+        # 1. number of results by type
+        # 2. number of exceptions (if any)
+        # 3. generated TOC for quick navigation (we may use hash of object_path as href)
+        # 4. evaluation stats (e.g. number of workers, total time elapsed, ...)
+        for task in sorted_tasks:
+            if task.results:
+                md.write(f"\n{task.analyzer.get_title()}\n")
+            for res in task.results:
+                # TODO(rousik): We may add some indication of severity here.
+                md.write(res.markdown.rstrip() + "\n")
         return md.getvalue()

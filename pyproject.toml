@@ -28,6 +28,7 @@ opentelemetry-exporter-otlp-proto-grpc = "^1.20.0"
 markdown = "^3.5.1"
 py-gfm = "^2.0.0"
 backoff = "^2.2.1"
+progress = "^1.6"
 
 
 [tool.poetry.group.dev.dependencies]

@@ -3,7 +3,7 @@
 from pathlib import Path
 import logging
 import re
-from typing import Counter
+from typing import Counter, Iterator
 from opentelemetry import trace
 
 import fsspec
@@ -11,7 +11,7 @@ from pudl_output_differ.parquet import ParquetAnalyzer, ParquetFile
 from pudl_output_differ.sqlite import Database, SQLiteAnalyzer
 
 from pudl_output_differ.types import (
-    AnalysisReport, Analyzer, KeySetDiff, TaskQueueInterface
+    Result, Analyzer, KeySetDiff, TaskQueueInterface
 )
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,8 @@ class DirectoryAnalyzer(Analyzer):
     local_cache_root: str | None = None
     filename_filter: str = ""
 
-    
+    def get_title(self) -> str:
+        return "## Files"
     def get_files(self, root_path: str) -> dict[str, str]:
         """Returns list of files in the output directory.
 
@@ -84,7 +85,7 @@ class DirectoryAnalyzer(Analyzer):
         # fs to detrmine local path only when needed.
         return f.name
 
-    def execute(self, task_queue: TaskQueueInterface) -> AnalysisReport:
+    def execute(self, task_queue: TaskQueueInterface) -> Iterator[Result]:
         """Computes diff between two output directories.
 
         Files on the left and right are compared for presence, children
@@ -136,8 +137,5 @@ class DirectoryAnalyzer(Analyzer):
             for fmt, count in unsupported_formats.items():
                 logger.warning(f"Unsupported file format {fmt} found {count} times.")
 
-        return AnalysisReport(
-            object_path=self.object_path,
-            title= "# Files",
-            markdown=file_diff.markdown(long_format=True),
-        )
+        if file_diff.has_diff():
+            yield Result(markdown=file_diff.markdown(long_format=True))

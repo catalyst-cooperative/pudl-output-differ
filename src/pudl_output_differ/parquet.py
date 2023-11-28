@@ -1,11 +1,17 @@
 """Module for comparing contents of parquet files."""
 
-from io import StringIO
 import logging
+from typing import Iterator
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pudl_output_differ.types import AnalysisReport, Analyzer, TaskQueueInterface, TypeDef
 import pyarrow.parquet as pq
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from pudl_output_differ.types import (
+    Analyzer,
+    Result,
+    TaskQueueInterface,
+    TypeDef,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,23 +35,16 @@ class ParquetAnalyzer(Analyzer):
     right_path: str
     # TODO(rousik): add settings once we know how to tune this
 
-    def execute(self, task_queue: TaskQueueInterface) -> AnalysisReport:
-        md = StringIO()
+    def execute(self, task_queue: TaskQueueInterface) -> Iterator[Result]:
         lmeta = pq.read_metadata(self.left_path)
         rmeta = pq.read_metadata(self.right_path)
         if not lmeta.schema.equals(rmeta.schema):
-            md.write("* parquet schemas are different.\n")
+            yield Result(markdown=" * parquet schemas are different.\n")
             # TODO(rousik): add comparison of schema columns
 
         # TODO(rousik): try loading the contents of the parquet files
         # for comparison. This will be similar to sqlite and may reuse
         # the same pandas machinery.
-        return AnalysisReport(
-            object_path=self.object_path,
-            title=f"## Parquet file {self.name}",
-            markdown=md.getvalue()
-        )
-
 
 # logger = logging.getLogger(__name__)
 

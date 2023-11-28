@@ -140,15 +140,11 @@ def main() -> int:
                 },
             ),
         )
+        # TODO(rousik): add support for CloudTraceSpanExporter here, see
+        # https://cloud.google.com/trace/docs/setup/python-ot
         processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=args.trace_backend))
         provider.add_span_processor(processor)
         trace.set_tracer_provider(provider)
-
-    # provider = TracerProvider()
-    # TODO(rousik): add support for other trace backends.
-    # processor = BatchSpanProcessor(ConsoleSpanExporter())
-    # provider.add_span_processor(processor)
-    # trace.set_tracer_provider(provider)
 
     if not args.cache_dir and any(is_remote(p) for p in [args.left, args.right]):
         args.cache_dir = tempfile.mkdtemp()

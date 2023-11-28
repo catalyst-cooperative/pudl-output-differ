@@ -2,7 +2,7 @@
 
 import logging
 from io import StringIO
-from typing import Optional
+from typing import Iterator, Optional
 
 import backoff
 import pandas as pd
@@ -12,9 +12,10 @@ from sqlalchemy import Connection, Engine, create_engine, inspect, text
 from sqlalchemy.exc import OperationalError
 
 from pudl_output_differ.types import (
-    AnalysisReport,
     Analyzer,
     KeySetDiff,
+    ReportSeverity,
+    Result,
     TaskQueueInterface,
     TypeDef,
 )
@@ -89,7 +90,7 @@ class SQLiteAnalyzer(Analyzer):
             return True
         return table_name in self.settings.sqlite_tables_only
 
-    def execute(self, task_queue: TaskQueueInterface) -> AnalysisReport:
+    def execute(self, task_queue: TaskQueueInterface) -> Iterator[Result]:
         """Analyze tables and their schemas."""
         trace.get_current_span().set_attribute("db_name", self.db_name)
 
@@ -103,6 +104,9 @@ class SQLiteAnalyzer(Analyzer):
             right=rtables,
             entity="tables",
         )
+        if tables_diff.has_diff():
+            yield Result(markdown=tables_diff.markdown())
+
         for table_name in sorted(tables_diff.shared):
             if not self.should_process_table(table_name):
                 logger.debug(
@@ -119,11 +123,6 @@ class SQLiteAnalyzer(Analyzer):
                     table_name=table_name,
                 )
             )
-        return AnalysisReport(
-            object_path=self.object_path,
-            title="## SQLite database {db_name}",
-            markdown=tables_diff.markdown(),
-        )
 
 
 class TableAnalyzer(Analyzer):
@@ -135,6 +134,14 @@ class TableAnalyzer(Analyzer):
     table_name: str
     partition_key: str = ""
     settings: SQLiteSettings = SQLiteSettings()
+
+
+    def get_title(self) -> str:
+        """Returns the title of the analysis."""
+        title = f"## Table {self.db_name}/{self.table_name}"
+        if self.partition_key:
+            title += f" (partition {self.get_partition_func()}=`{self.partition_key}`)"
+        return title
 
     def get_pk_columns(self, engine: Engine) -> list[str]:
         """Returns list of primary key columns."""
@@ -183,7 +190,7 @@ class TableAnalyzer(Analyzer):
     @tracer.start_as_current_span("split_to_partitioned_tasks")
     def split_to_partitioned_tasks(
         self, task_queue: TaskQueueInterface, lconn: Connection, rconn: Connection
-    ) -> AnalysisReport:
+    ) -> Iterator[Result]:
         """Splits table analysis into partitioned tasks.
 
         Partition keys are calculated, new task is then submitted for each
@@ -234,15 +241,12 @@ class TableAnalyzer(Analyzer):
         if partition_diff.has_diff():
             md.write(f"Change in partitions (using partition function: `{part_func}`):\n")
         for pk in partition_diff.left_only:
-            md.write(f"* partition {pk} removed ({lparts[pk]} rows)\n")
+            md.write(f" * partition {pk} removed ({lparts[pk]} rows)\n")
         for pk in partition_diff.right_only:
-            md.write(f"* partition {pk} added ({rparts[pk]} rows)\n")
+            md.write(f" * partition {pk} added ({rparts[pk]} rows)\n")
 
-        return AnalysisReport(
-            object_path=self.object_path,
-            title=f"## Table {self.db_name}/{self.table_name} partitioning",
-            markdown=md.getvalue(),
-        )
+        if md.tell() > 0:
+            yield Result(markdown=md.getvalue())
     
     @backoff.on_exception(backoff.expo, OperationalError, max_tries=4)
     def retry_connect(self, engine: Engine) -> Connection:
@@ -251,14 +255,13 @@ class TableAnalyzer(Analyzer):
             sp.set_attribute("db_path", engine.url.render_as_string())
             return engine.connect()
 
-    def execute(self, task_queue: TaskQueueInterface) -> AnalysisReport:
+    def execute(self, task_queue: TaskQueueInterface) -> Iterator[Result]:
         """Analyze tables and their schemas."""
         sp = trace.get_current_span()
         sp.set_attribute("db_name", self.db_name)
         sp.set_attribute("table_name", self.table_name)
         if self.partition_key:
             sp.set_attribute("partition_key", self.partition_key)
-
 
         l_db_engine = create_engine(f"sqlite:///{self.left_db_path}")
         r_db_engine = create_engine(f"sqlite:///{self.right_db_path}")
@@ -276,15 +279,18 @@ class TableAnalyzer(Analyzer):
             )
 
         if not self.partition_key and self.is_partitioned_table():
-            return self.split_to_partitioned_tasks(task_queue, lconn, rconn)
+            for res in self.split_to_partitioned_tasks(task_queue, lconn, rconn):
+                yield res
 
         if not l_pk:
-            return self.compare_raw_tables(lconn, rconn)
-
-        return self.compare_pk_tables(lconn, rconn, sorted(l_pk))
+            for res in self.compare_raw_tables(lconn, rconn):
+                yield res
+        else:
+            for res in self.compare_pk_tables(lconn, rconn, sorted(l_pk)):
+                yield res
 
     @tracer.start_as_current_span(name="compare_raw_tables")
-    def compare_raw_tables(self, ldb: Connection, rdb: Connection) -> AnalysisReport:
+    def compare_raw_tables(self, ldb: Connection, rdb: Connection) -> Iterator[Result]:
         """Compare two tables that do not have primary key columns.
 
         For now, simply assess the rate of change in number of rows without digging
@@ -296,30 +302,17 @@ class TableAnalyzer(Analyzer):
 
         if lrows > rrows:
             pct_change = float(abs(lrows - rrows) * 100) / lrows
-            return AnalysisReport(
-                object_path=self.object_path,
-                title=f"## Table {self.db_name}/{self.table_name} rows",
-                markdown=f" * removed {lrows - rrows} rows ({pct_change:.2f}% change)",
-            )
+            yield Result(markdown=f" * removed {lrows - rrows} rows ({pct_change:.2f}% change)\n")
         elif rrows > lrows:
             if lrows > 0:
                 pct_change = float(abs(lrows - rrows) * 100) / lrows
-                msg = f" * added {rrows - lrows} rows ({pct_change:.2f}% change)"
+                yield Result(markdown=f" * added {rrows - lrows} rows ({pct_change:.2f}% change)\n")
             else:
-                msg = f" * added {rrows} rows (no rows previously)"
-
-            return AnalysisReport(
-                object_path=self.object_path,
-                title=f"## Table {self.db_name}/{self.table_name} rows",
-                markdown=msg,
-            )
+                yield Result(markdown=f" * added {rrows} rows (no rows previously)\n")
 
         # TODO(rousik): By doing df.merge() we should be able to tell how many rows were added/removed/changed.
         # If there's change to any column content, this will be marked as both left_only and right_only
         # and there's no way to easily tell that this is "changed" row, and this row will be double counted.
-
-        # The following is empty report with no content.
-        return AnalysisReport(object_path=self.object_path)
 
     @tracer.start_as_current_span("get_records")
     def get_records(
@@ -368,7 +361,7 @@ class TableAnalyzer(Analyzer):
         ldb: Connection,
         rdb: Connection,
         pk_cols: list[str],
-    ) -> AnalysisReport:
+    ) -> Iterator[Result]:
         """Compare two tables with primary key columns.
 
         Args:
@@ -389,11 +382,11 @@ class TableAnalyzer(Analyzer):
         cols_removed = set(lcols) - set(rcols)
         if cols_removed:
             cstr = ", ".join(sorted(cols_removed))
-            md.write(f" * {len(cols_removed)} columns removed: {cstr}\n")
+            yield Result(markdown=f" * {len(cols_removed)} columns removed: {cstr}\n")
         cols_added = set(rcols) - set(lcols)
         if cols_added:
             cstr = ", ".join(sorted(cols_added))
-            md.write(f" * {len(cols_added)} columns added: {cstr}\n")
+            yield Result(markdown=f" * {len(cols_added)} columns added: {cstr}\n")
 
         cols_intact = []
         cols_changed = []
@@ -406,14 +399,14 @@ class TableAnalyzer(Analyzer):
             cstr = ", ".join(
                 "{c}({lcols[c]}->{rcols[c]})" for c in sorted(cols_changed)
             )
-            md.write(f" * {len(cols_changed)} columns changed type: {cstr}\n")
+            yield Result(markdown=f" * {len(cols_changed)} columns changed type: {cstr}\n")
 
         # pk_cols should be filtered so that only cols_intact are considered
         pk_cols_filtered = [c for c in pk_cols if c in cols_intact]
         if len(pk_cols_filtered) != len(pk_cols):
             pk_cols_dropped = sorted(set(pk_cols) - set(pk_cols_filtered))
-            md.write(
-                f" * {len(pk_cols_dropped)} primary key columns need to be dropped: {', '.join(pk_cols_dropped)}\n"
+            yield Result(
+                markdown=f" * {len(pk_cols_dropped)} primary key columns need to be dropped: {', '.join(pk_cols_dropped)}\n"
             )
             pk_cols = pk_cols_filtered
 
@@ -447,12 +440,12 @@ class TableAnalyzer(Analyzer):
                     )
                 else:
                     pct_change = "(no rows previously)"
-                md.write(f"* added {rows_added} rows {pct_change}\n")
+                yield Result(markdown=f" * added {rows_added} rows {pct_change}\n")
             if rows_removed:
                 pct_change = (
                     f"({float(rows_removed) * 100 / orig_row_count :.2f}% change)"
                 )
-                md.write(f"* removed {rows_removed} rows {pct_change}\n")
+                yield Result(markdown=f" * removed {rows_removed} rows {pct_change}\n")
 
         with tracer.start_as_current_span("compare_overlapping_rows") as sp:
             sp.set_attribute("num_rows", len(overlap_index))
@@ -471,7 +464,7 @@ class TableAnalyzer(Analyzer):
             rows_changed = len(diff_rows)
             if rows_changed:
                 pct_change = float(rows_changed) * 100 / orig_row_count
-                md.write(f"* changed {rows_changed} rows ({pct_change:.2f}% change)\n")
+                yield Result(markdown=f" * changed {rows_changed} rows ({pct_change:.2f}% change)\n")
 
                 # calculate number of rows that have changes in a particular column
                 changes_per_col = (~diff_rows.T.isna()).groupby(level=0).any().T.sum()
@@ -479,16 +472,9 @@ class TableAnalyzer(Analyzer):
                 changes_per_col.columns = ["column_name", "num_rows"]
 
                 # TODO(rousik): assign column names: column_name, rows_changed
-                md.write("\nNumber of changes detected per column:\n\n")
-                md.write(changes_per_col.to_markdown())
-                md.write("\n")
+                # TODO(rousik): This could be severity DIAGNOSTIC.
 
-        title = f"## Table {self.db_name}/{self.table_name}"
-        if self.partition_key:
-            title += f" (partition {self.get_partition_func()}={self.partition_key})"
-
-        return AnalysisReport(
-            object_path=self.object_path,
-            title=title,
-            markdown=md.getvalue(),
-        )
+                cc = StringIO()
+                cc.write("Number of changes detected per column:\n\n")
+                cc.write(changes_per_col.to_markdown())
+                yield Result(severity=ReportSeverity.DIAGNOSTIC, markdown=cc.getvalue())

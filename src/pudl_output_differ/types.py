@@ -1,14 +1,13 @@
 """Generic types used in output diffing."""
-from abc import ABC, abstractmethod
 from enum import IntEnum
+import logging
+from abc import ABC, abstractmethod
 from functools import total_ordering
 from io import StringIO
-import logging
-from typing import Protocol
-
-from pydantic import BaseModel
+from typing import Iterator, Protocol
 
 from opentelemetry import trace
+from pydantic import BaseModel
 
 # from pudl_output_differ.task_queue import TaskQueue
 
@@ -88,32 +87,27 @@ class ObjectPath(BaseModel):
 
 # TODO(rousik): add the following, when useful.
 class ReportSeverity(IntEnum):
-     """Indicates the severity of a given report."""
+     """Indicates the severity of a given result."""
      INFO = 0
      WARNING = 1
      ERROR = 2
-     EXCEPTION = 3
-
-# class ReportBlock(BaseModel):
-#     """Represents single block of data that is part of the report."""
-#     severity: ReportSeverity = ReportSeverity.ERROR
-#     content: str = ""
+     DIAGNOSTIC = 3
+     EXCEPTION = 4
 
 
-class AnalysisReport(BaseModel):
-    """Holds the results of the analysis."""
-    object_path: ObjectPath
-    title: str = ""
-    markdown: str = ""
+# We can modify execute() method to take both the task_queue
+# and report buffer as arguments; it can then publish issues
+# into the report buffer, one result at a time.
+# This might be a bit easier than single return value that
+# is constructed bit by bit. However, we may also want to 
+# be able to append to the result buffer for convenience
+# and set its severity afterwards, to allow for changing
+# conditions.
+
+class Result(BaseModel):
+    """Represents single analysis result."""
     severity: ReportSeverity = ReportSeverity.ERROR
-
-    # TODO(rousik): analysis should be associated with object_path. Unclear
-    # whether this should be part of the report, or attached to the object
-    # by the TaskQueue.
-
-    def has_changes(self) -> bool:
-        """Returns true if the report is non-empty."""
-        return bool(self.markdown)
+    markdown: str = ""
 
 
 class TaskQueueInterface(Protocol):
@@ -123,7 +117,6 @@ class TaskQueueInterface(Protocol):
     """
     def put(self, analyzer: "Analyzer") -> None:
         ...
-
 
 
 class Analyzer(BaseModel, ABC):
@@ -136,8 +129,16 @@ class Analyzer(BaseModel, ABC):
     object_path: ObjectPath
     
     @abstractmethod
-    def execute(self, task_queue: TaskQueueInterface) -> AnalysisReport:
-        """Runs the analysis and returns the report."""
+    def execute(self, task_queue: TaskQueueInterface) -> Iterator[Result]:
+        """Runs the analysis and returns results, one at a time."""
+
+    def execute_sync(self, task_queue: TaskQueueInterface) -> list[Result]:
+        """Runs execute and converts all results to a list."""
+        return list(self.execute(task_queue))
+
+    def get_title(self):
+        """Returns the title of the analysis."""
+        return f"## {self.object_path}"
 
 
 class KeySetDiff(BaseModel):
@@ -156,10 +157,10 @@ class KeySetDiff(BaseModel):
             return 
         n = len(stuff)
         if long_format:
-            out.write(f"* {n} {self.entity} {verb}:\n")
+            out.write(f" * {n} {self.entity} {verb}:\n")
             out.writelines([f"  * {k}\n" for k in sorted(stuff)])
         else:
-            out.write(f"* {n} {self.entity} {verb}: {sorted(stuff)}\n")
+            out.write(f" * {n} {self.entity} {verb}: {sorted(stuff)}\n")
     
     def markdown(self, long_format: bool = False) -> str:
         out = StringIO()
