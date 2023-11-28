@@ -171,13 +171,14 @@ def main() -> int:
 
     if args.html_report:
         md = task_queue.to_markdown()
-        with fsspec.open(args.html_report, "w") as f:
+        fs, report_path = fsspec.core.url_to_fs(args.html_report.removesuffix(".html"))
+        with fs.open(f"{report_path}.html", "w") as f:
             f.write(MARKDOWN_CSS_STYLE)
             f.write('<article class="markdown-body">')
             f.write(markdown.markdown(md, extensions=[GithubFlavoredMarkdownExtension()]))
             f.write('</article>')
-        with fsspec.open(args.html_report + ".markdown", "w") as f:
-            f.write(md)
+        with fs.open(f"{report_path}.markdown", "w") as f:
+            f.write(markdown.markdown(md, extensions=[GithubFlavoredMarkdownExtension()]))
 
     # TODO(rousik): for the proper output, sort the
     # analyses by their object_path and construct the

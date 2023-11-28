@@ -369,7 +369,6 @@ class TableAnalyzer(Analyzer):
             rdb: connection to the right database
             pk_cols: primary key columns
         """
-        md = StringIO()
         overlap_index = None
         ldf = pd.DataFrame()
         rdf = pd.DataFrame()
