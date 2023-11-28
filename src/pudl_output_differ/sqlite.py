@@ -475,6 +475,6 @@ class TableAnalyzer(Analyzer):
                 # TODO(rousik): This could be severity DIAGNOSTIC.
 
                 cc = StringIO()
-                cc.write("Number of changes detected per column:\n\n")
+                cc.write("\nNumber of changes found per column:\n\n")
                 cc.write(changes_per_col.to_markdown())
                 yield Result(severity=ReportSeverity.DIAGNOSTIC, markdown=cc.getvalue())
