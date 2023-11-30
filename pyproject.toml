@@ -29,6 +29,7 @@ markdown = "^3.5.1"
 py-gfm = "^2.0.0"
 backoff = "^2.2.1"
 progress = "^1.6"
+opentelemetry-exporter-gcp-trace = "^1.6.0"
 
 
 [tool.poetry.group.dev.dependencies]

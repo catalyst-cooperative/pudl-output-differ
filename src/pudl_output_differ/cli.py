@@ -19,6 +19,7 @@ import fsspec
 import markdown
 from mdx_gfm import GithubFlavoredMarkdownExtension
 from opentelemetry import trace
+from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -109,7 +110,13 @@ def parse_command_line(argv) -> argparse.Namespace:
         help="If supplied, diff will be published as a comment to the github PR.",
     )
     parser.add_argument(
-        "--trace-backend",
+        "--gcp-cloud-trace",
+        type=bool,
+        default=False,
+        help="If True, publish traces to GCP Cloud Trace service.",
+    )
+    parser.add_argument(
+        "--otel-trace-backend",
         default="",
         # default="http://localhost:4317/",
         help="Address of the OTEL compatible trace backend.",
@@ -125,26 +132,34 @@ def parse_command_line(argv) -> argparse.Namespace:
     return arguments
 
 
+def setup_tracing(args: argparse.Namespace) -> None:
+    """Configures tracing based on the command line arguments."""
+    provider = TracerProvider(
+        resource=Resource(
+            attributes={
+                SERVICE_NAME: "pudl-output-differ",
+            },
+        ),
+    )
+    if args.otel_trace_backend:
+        logger.info(f"Publishing traces to OTEL backend {args.otel_trace_backend}")
+        processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=args.trace_backend))
+        provider.add_span_processor(processor)
+
+    if args.gcp_cloud_trace:
+        logger.info("Publishing traces to Google Cloud Trace service.")
+        provider.add_span_processor(
+            BatchSpanProcessor(CloudTraceSpanExporter())
+        )        
+    trace.set_tracer_provider(provider)
+
+
 def main() -> int:
     """Run differ on two directories."""
     args = parse_command_line(sys.argv)
 
     logging.basicConfig(stream=sys.stdout, level=args.loglevel)
-
-    if args.trace_backend:
-        logger.info(f"Configuring tracing to OTEL backend {args.trace_backend}")
-        provider = TracerProvider(
-            resource=Resource(
-                attributes={
-                    SERVICE_NAME: "pudl-output-differ",
-                },
-            ),
-        )
-        # TODO(rousik): add support for CloudTraceSpanExporter here, see
-        # https://cloud.google.com/trace/docs/setup/python-ot
-        processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=args.trace_backend))
-        provider.add_span_processor(processor)
-        trace.set_tracer_provider(provider)
+    setup_tracing(args)
 
     if not args.cache_dir and any(is_remote(p) for p in [args.left, args.right]):
         args.cache_dir = tempfile.mkdtemp()
@@ -180,30 +195,7 @@ def main() -> int:
         with fs.open(f"{report_path}.markdown", "w") as f:
             f.write(markdown.markdown(md, extensions=[GithubFlavoredMarkdownExtension()]))
 
-    # TODO(rousik): for the proper output, sort the
-    # analyses by their object_path and construct the
-    # title depth automatically (by skipping empty analyses
-    # or by calculating depth based on the object_path).
-
-    # if args.github_pr and args.github_repo:
-    #     gh = Github(os.environ["GITHUB_TOKEN"])
-    #     gh.get_repo(args.github_repo).get_pull(args.github_pr)
-    #     task_queue.wait()
-    #     # Iterate diff tree in a BFS manner and generate PR comment.
-    # else:
-    #     for diff in task_queue.get_diffs():
-    #         if diff.has_diff():
-    #             has_diff = True
-    #             print(diff)
-
-    # if args.github_pr and args.github_repo:
-    #     gh = Github(os.environ["GITHUB_TOKEN"])
-    #     gh.get_repo(args.github_repo).get_pull(args.github_pr).create_issue_comment(
-    #         body=diff.to_github_comment()
-    #     )
-
-    # if has_diff:
-    #     return 1
+    # TODO(rousik): add suopport for publishing comments to github PRs/analyses.
     return 0
 
 
