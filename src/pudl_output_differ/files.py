@@ -1,18 +1,16 @@
 """Generic utilities for diffing PUDL_OUTPUT directories."""
 
-from pathlib import Path
 import logging
 import re
+from pathlib import Path
 from typing import Counter, Iterator
-from opentelemetry import trace
 
 import fsspec
+from opentelemetry import trace
+
 from pudl_output_differ.parquet import ParquetAnalyzer, ParquetFile
 from pudl_output_differ.sqlite import Database, SQLiteAnalyzer
-
-from pudl_output_differ.types import (
-    Result, Analyzer, KeySetDiff, TaskQueueInterface
-)
+from pudl_output_differ.types import Analyzer, KeySetDiff, Result, TaskQueueInterface
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -38,7 +36,8 @@ class DirectoryAnalyzer(Analyzer):
     filename_filter: str = ""
 
     def get_title(self) -> str:
-        return "## Files"
+        return "Files"
+    
     def get_files(self, root_path: str) -> dict[str, str]:
         """Returns list of files in the output directory.
 

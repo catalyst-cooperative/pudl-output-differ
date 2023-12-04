@@ -11,12 +11,14 @@ For other files, file checksums are calculated and compared instead.
 import argparse
 import atexit
 import logging
+import os
 import shutil
 import sys
 import tempfile
 
 import fsspec
 import markdown
+import psutil
 from mdx_gfm import GithubFlavoredMarkdownExtension
 from opentelemetry import trace
 from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
@@ -24,9 +26,10 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from prometheus_client import Gauge, start_http_server
 
 from pudl_output_differ.files import DirectoryAnalyzer, is_remote
-from pudl_output_differ.task_queue import TaskQueue
+from pudl_output_differ.task_queue import TaskQueue, TaskQueueSettings
 from pudl_output_differ.types import ObjectPath
 
 logger = logging.getLogger(__name__)
@@ -96,19 +99,6 @@ def parse_command_line(argv) -> argparse.Namespace:
         default="",
         help="""If set, write html markdown report into this file.""",
     )
-
-    parser.add_argument(
-        "--github-repo",
-        type=str,
-        default="",
-        help="Name of the github repository where comments should be posted.",
-    )
-    parser.add_argument(
-        "--github-pr",
-        type=int,
-        default=0,
-        help="If supplied, diff will be published as a comment to the github PR.",
-    )
     parser.add_argument(
         "--gcp-cloud-trace",
         type=bool,
@@ -128,6 +118,25 @@ def parse_command_line(argv) -> argparse.Namespace:
         # default="INFO",
         help="Controls the severity of logging.",
     )
+    parser.add_argument(
+        "--prometheus-port",
+        type=int,
+        default=9101,
+        help="Port on which to start prometheus metrics server."
+    )
+    # parser.add_argument(
+    #     "--github-repo",
+    #     type=str,
+    #     default="",
+    #     help="Name of the github repository where comments should be posted.",
+    # )
+    # parser.add_argument(
+    #     "--github-pr",
+    #     type=int,
+    #     default=0,
+    #     help="If supplied, diff will be published as a comment to the github PR.",
+    # )
+
     arguments = parser.parse_args(argv[1:])
     return arguments
 
@@ -143,14 +152,14 @@ def setup_tracing(args: argparse.Namespace) -> None:
     )
     if args.otel_trace_backend:
         logger.info(f"Publishing traces to OTEL backend {args.otel_trace_backend}")
-        processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=args.trace_backend))
+        processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=args.otel_trace_backend))
         provider.add_span_processor(processor)
 
     if args.gcp_cloud_trace:
         logger.info("Publishing traces to Google Cloud Trace service.")
         provider.add_span_processor(
             BatchSpanProcessor(CloudTraceSpanExporter())
-        )        
+        )
     trace.set_tracer_provider(provider)
 
 
@@ -169,20 +178,44 @@ def main() -> int:
     lpath = args.left
     rpath = args.right
 
-    with tracer.start_as_current_span(name="main"):
-        task_queue = TaskQueue(max_workers=args.max_workers)
-
-        task_queue.put(
-            DirectoryAnalyzer(
-                object_path=ObjectPath(),
-                left_path=lpath,
-                right_path=rpath,
-                local_cache_root=args.cache_dir,
-                filename_filter=args.filename_filter,
-            )
+    if args.prometheus_port:
+        start_http_server(args.prometheus_port)
+        Gauge("cpu_usage", "Usage of the CPU in percent.").set_function(
+            lambda: psutil.cpu_percent(interval=1)
         )
-        task_queue.run()
-        task_queue.wait()
+        Gauge("memory_usage", "Usage of the memory in percent.").set_function(
+            lambda: psutil.virtual_memory().percent
+        )
+        proc_self = psutil.Process(os.getpid())
+        Gauge("process_memory_rss", "RSS of the Python process").set_function(
+            lambda: proc_self.memory_info().rss
+        )
+        Gauge("process_memory_vms", "VMS of the Python process").set_function(
+            lambda: proc_self.memory_info().vms
+        )
+        # TODO(rousik): proc_self.cpu_times() can also be helpful to get total CPU burn.
+        # Note that the above approach may not be optimal, we might choose to use
+        # with proc_self.oneshot(): to avoid repeated calls, and perhaps run the
+        # updater in a background thread that can sleep a lot.
+
+
+    task_queue = TaskQueue(
+        settings=TaskQueueSettings(
+            max_workers=args.max_workers,
+        )
+    )
+
+    task_queue.put(
+        DirectoryAnalyzer(
+            object_path=ObjectPath(),
+            left_path=lpath,
+            right_path=rpath,
+            local_cache_root=args.cache_dir,
+            filename_filter=args.filename_filter,
+        )
+    )
+    task_queue.run()
+    task_queue.wait()
 
     if args.html_report:
         md = task_queue.to_markdown()

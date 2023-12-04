@@ -1,7 +1,7 @@
 """Generic types used in output diffing."""
-from enum import IntEnum
 import logging
 from abc import ABC, abstractmethod
+from enum import IntEnum
 from functools import total_ordering
 from io import StringIO
 from typing import Iterator, Protocol

@@ -7,6 +7,7 @@ from typing import Iterator, Optional
 import backoff
 import pandas as pd
 from opentelemetry import trace
+from prometheus_client import Summary
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import Connection, Engine, create_engine, inspect, text
 from sqlalchemy.exc import OperationalError
@@ -23,12 +24,13 @@ from pudl_output_differ.types import (
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
 
+SQLITE_CONNECT_SECONDS = Summary("sqlite_connect_seconds", "Time spent connecting sqlite databases.", ["db_name", "table_name"])
 
 REPORT_YEAR_PARTITION = "substr(report_date, 1, 4)"
 
 
-# TODO(rousik): for the sake of unit-testing, we should be passing 
-# these as `settings` to the individual analyzers. 
+# TODO(rousik): for the sake of unit-testing, we should be passing
+# these as `settings` to the individual analyzers.
 class SQLiteSettings(BaseSettings):
     """Default configuration for this module."""
 
@@ -45,6 +47,10 @@ class SQLiteSettings(BaseSettings):
     # columns. Otherwise we will fetch PK only and then only fetch overlapping
     # rows for the matching PKs.
     single_pass_pk_comparison: bool = False
+
+    # If this is set to True, records and columns outside of PK columns will be
+    # compared. By default we only look for PK columns.
+    enable_full_row_comparison: bool = False
 
 
 class Database(TypeDef):
@@ -138,7 +144,7 @@ class TableAnalyzer(Analyzer):
 
     def get_title(self) -> str:
         """Returns the title of the analysis."""
-        title = f"## Table {self.db_name}/{self.table_name}"
+        title = f"Table {self.db_name}/{self.table_name}"
         if self.partition_key:
             title += f" (partition {self.get_partition_func()}=`{self.partition_key}`)"
         return title
@@ -247,7 +253,7 @@ class TableAnalyzer(Analyzer):
 
         if md.tell() > 0:
             yield Result(markdown=md.getvalue())
-    
+
     @backoff.on_exception(backoff.expo, OperationalError, max_tries=4)
     def retry_connect(self, engine: Engine) -> Connection:
         """Connects to the database, retrying on OperationalError."""
@@ -266,9 +272,6 @@ class TableAnalyzer(Analyzer):
         l_db_engine = create_engine(f"sqlite:///{self.left_db_path}")
         r_db_engine = create_engine(f"sqlite:///{self.right_db_path}")
 
-        lconn = self.retry_connect(l_db_engine)
-        rconn = self.retry_connect(r_db_engine)
-
         # TODO(rousik): test for schema discrepancies here.
         l_pk = self.get_pk_columns(l_db_engine)
         r_pk = self.get_pk_columns(r_db_engine)
@@ -278,11 +281,17 @@ class TableAnalyzer(Analyzer):
                 f"Primary key columns for {self.table_name} do not match."
             )
 
+        with SQLITE_CONNECT_SECONDS.labels(self.db_name,  self.table_name).time():
+            lconn = self.retry_connect(l_db_engine)
+            rconn = self.retry_connect(r_db_engine)
+
         if not self.partition_key and self.is_partitioned_table():
             for res in self.split_to_partitioned_tasks(task_queue, lconn, rconn):
                 yield res
 
         if not l_pk:
+            if not self.settings.enable_full_row_comparison:
+                return
             for res in self.compare_raw_tables(lconn, rconn):
                 yield res
         else:
@@ -446,34 +455,35 @@ class TableAnalyzer(Analyzer):
                 )
                 yield Result(markdown=f" * removed {rows_removed} rows {pct_change}\n")
 
-        with tracer.start_as_current_span("compare_overlapping_rows") as sp:
-            sp.set_attribute("num_rows", len(overlap_index))
-            if self.settings.single_pass_pk_comparison:
-                ldf = ldf.loc[overlap_index]
-                rdf = rdf.loc[overlap_index]
-            else:
-                with tracer.start_as_current_span("load_overlapping_rows"):
-                    ldf = self.get_records(ldb, columns=cols_intact, index_columns=pk_cols)
+        if self.settings.enable_full_row_comparison:
+            with tracer.start_as_current_span("compare_overlapping_rows") as sp:
+                sp.set_attribute("num_rows", len(overlap_index))
+                if self.settings.single_pass_pk_comparison:
                     ldf = ldf.loc[overlap_index]
-
-                    rdf = self.get_records(rdb, columns=cols_intact, index_columns=pk_cols)
                     rdf = rdf.loc[overlap_index]
+                else:
+                    with tracer.start_as_current_span("load_overlapping_rows"):
+                        ldf = self.get_records(ldb, columns=cols_intact, index_columns=pk_cols)
+                        ldf = ldf.loc[overlap_index]
 
-            diff_rows = ldf.compare(rdf, result_names=("left", "right"))
-            rows_changed = len(diff_rows)
-            if rows_changed:
-                pct_change = float(rows_changed) * 100 / orig_row_count
-                yield Result(markdown=f" * changed {rows_changed} rows ({pct_change:.2f}% change)\n")
+                        rdf = self.get_records(rdb, columns=cols_intact, index_columns=pk_cols)
+                        rdf = rdf.loc[overlap_index]
 
-                # calculate number of rows that have changes in a particular column
-                changes_per_col = (~diff_rows.T.isna()).groupby(level=0).any().T.sum()
-                changes_per_col = changes_per_col.to_frame().reset_index()
-                changes_per_col.columns = ["column_name", "num_rows"]
+                diff_rows = ldf.compare(rdf, result_names=("left", "right"))
+                rows_changed = len(diff_rows)
+                if rows_changed:
+                    pct_change = float(rows_changed) * 100 / orig_row_count
+                    yield Result(markdown=f" * changed {rows_changed} rows ({pct_change:.2f}% change)\n")
 
-                # TODO(rousik): assign column names: column_name, rows_changed
-                # TODO(rousik): This could be severity DIAGNOSTIC.
+                    # calculate number of rows that have changes in a particular column
+                    changes_per_col = (~diff_rows.T.isna()).groupby(level=0).any().T.sum()
+                    changes_per_col = changes_per_col.to_frame().reset_index()
+                    changes_per_col.columns = ["column_name", "num_rows"]
 
-                cc = StringIO()
-                cc.write("\nNumber of changes found per column:\n\n")
-                cc.write(changes_per_col.to_markdown())
-                yield Result(severity=ReportSeverity.DIAGNOSTIC, markdown=cc.getvalue())
+                    # TODO(rousik): assign column names: column_name, rows_changed
+                    # TODO(rousik): This could be severity DIAGNOSTIC.
+
+                    cc = StringIO()
+                    cc.write("\nNumber of changes found per column:\n\n")
+                    cc.write(changes_per_col.to_markdown())
+                    yield Result(severity=ReportSeverity.DIAGNOSTIC, markdown=cc.getvalue())
