@@ -15,9 +15,11 @@ import os
 import shutil
 import sys
 import tempfile
+from io import StringIO
 
 import fsspec
 import markdown
+import progressbar
 import psutil
 from mdx_gfm import GithubFlavoredMarkdownExtension
 from opentelemetry import trace
@@ -167,7 +169,8 @@ def main() -> int:
     """Run differ on two directories."""
     args = parse_command_line(sys.argv)
 
-    logging.basicConfig(stream=sys.stdout, level=args.loglevel)
+    progressbar.streams.wrap_stderr()
+    logging.basicConfig(level=args.loglevel)
     setup_tracing(args)
 
     if not args.cache_dir and any(is_remote(p) for p in [args.left, args.right]):
@@ -218,15 +221,21 @@ def main() -> int:
     task_queue.wait()
 
     if args.html_report:
-        md = task_queue.to_markdown()
+        md = StringIO()
+        md.write("# PUDL Output Analysis\n")
+        md.write(f" * Left side: `{args.left}`\n")
+        md.write(f" * Right side: `{args.right}`\n")
+        md.write("\n")
+        md.write(task_queue.to_markdown())
+
         fs, report_path = fsspec.core.url_to_fs(args.html_report.removesuffix(".html"))
         with fs.open(f"{report_path}.html", "w") as f:
             f.write(MARKDOWN_CSS_STYLE)
             f.write('<article class="markdown-body">')
-            f.write(markdown.markdown(md, extensions=[GithubFlavoredMarkdownExtension()]))
+            f.write(markdown.markdown(md.getvalue(), extensions=[GithubFlavoredMarkdownExtension()]))
             f.write('</article>')
         with fs.open(f"{report_path}.markdown", "w") as f:
-            f.write(md)
+            f.write(md.getvalue())
 
     # TODO(rousik): add suopport for publishing comments to github PRs/analyses.
     return 0

@@ -5,6 +5,7 @@ of the outstanding analyses.
 
 import concurrent.futures
 import logging
+from re import L
 import threading
 import traceback
 from collections import Counter
@@ -14,9 +15,9 @@ from io import StringIO
 from time import sleep
 from uuid import uuid1
 
+import progressbar
 import prometheus_client as prom
 from opentelemetry import context, trace
-from progress.bar import Bar
 from pydantic import UUID1, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -88,7 +89,7 @@ class TaskQueue:
         self.inflight_tasks: dict[UUID1, AnalysisMetadata] = {}
         self.completed_tasks: dict[UUID1, AnalysisMetadata] = {}
         self.runners: list[concurrent.futures.Future] = []
-        self.progress_bar = Bar(max=100)
+        self.progress_bar = progressbar.ProgressBar(max_value=progressbar.UnknownLength)
         self.prom_tasks_pending = prom.Gauge("tasks_pending", "Number of tasks pending")
         self.prom_tasks_inflight = prom.Gauge("tasks_inflight", "Number of tasks in-flight")
         self.prom_tasks_done = prom.Gauge("tasks_done", "Number of tasks completed")
@@ -102,9 +103,14 @@ class TaskQueue:
 
     def update_task_stats(self):
         """Updates prometheus metrics for task stats."""
-        self.prom_tasks_pending.set(len(self.pending_tasks))
-        self.prom_tasks_inflight.set(len(self.inflight_tasks))
-        self.prom_tasks_done.set(len(self.completed_tasks))
+        pending = len(self.pending_tasks)
+        inflight = len(self.inflight_tasks)
+        completed = len(self.completed_tasks)
+        self.prom_tasks_pending.set(pending)
+        self.prom_tasks_inflight.set(inflight)
+        self.prom_tasks_done.set(completed)
+        self.progress_bar.max_value = pending + inflight + completed
+        self.progress_bar.update(completed)
 
     def get_next_task(self) -> AnalysisMetadata | None:
         """Returns next pending analysis to run.
@@ -208,12 +214,6 @@ class TaskQueue:
                 # Move the analysis to completed state.
                 with self._lock:
                     self.prom_tasks_processed.labels(runner_id).inc()
-                    self.progress_bar.max = (
-                        len(self.pending_tasks) +
-                        len(self.inflight_tasks) +
-                        len(self.completed_tasks)
-                    )
-                    self.progress_bar.next()
                     self.completed_tasks[cur_task.id] = cur_task
                     del self.inflight_tasks[cur_task.id]
                     self.update_task_stats()
@@ -261,19 +261,26 @@ class TaskQueue:
         assert len(self.pending_tasks) + len(self.inflight_tasks) == 0
 
         md = StringIO()
-        md.write("# Summary\n")
+        md.write("## Summary\n")
         sorted_tasks = sorted(self.completed_tasks.values(), key=lambda t: t.object_path)
 
         # Count number of objects and then number of results by severity.
         by_severity = Counter(
             [res.severity.name for task in sorted_tasks for res in task.results]
         )
+        failed_tasks = sum(1 for t in sorted_tasks if t.state == ExecutionState.FAILED)
         if by_severity:
-            md.write(f"Processed {len(sorted_tasks)} objects. Got {by_severity.total()} results:\n\n")
+            md.write("\n")
+            md.write(f"* Ran {len(sorted_tasks)} analyses, got {by_severity.total()} results:\n")
+            md.write(f"* Encountered {failed_tasks} failures.\n")
+
+            md.write("\n")
+            md.write("Number of results by severity:\n\n")
             md.write("| Severity | Count |\n")
             md.write("| -------- | ----- |\n")
             for sev, cnt in by_severity.most_common():
                 md.write(f"| {sev} | {cnt} |\n")
+            md.write("\n")
 
             # List slow tasks (if any)
             slow_tasks = []
@@ -303,12 +310,26 @@ class TaskQueue:
         # - slowest 5 eval tasks
         # - generate TOC for quick navigation
 
-        # Exceptions may be moved to some other section rather than being
-        # embedded in the regular report as they are now.
+        exceptions: list[tuple[AnalysisMetadata, list[Result]]] = []
+        has_exceptions = False
+        md.write("\n\n## Results\n")
         for task in sorted_tasks:
+            if task.state == ExecutionState.FAILED:
+                has_exceptions = True
+                continue
             if task.results:
-                md.write(f"\n## {task.analyzer.get_title()}\n")
-            for res in task.results:
-                # TODO(rousik): We may add some indication of severity here.
-                md.write(res.markdown.rstrip() + "\n")
+                md.write(f"\n### {task.analyzer.get_title()}\n")
+                for res in task.results:
+                    md.write(res.markdown.rstrip() + "\n")
+
+        if has_exceptions:
+            md.write("\n## Exceptions\n")
+            for task in sorted_tasks:
+                if task.state != ExecutionState.FAILED:
+                    continue
+                if task.results:
+                    md.write(f"\n### {task.analyzer.get_title()}\n")
+                    for res in task.results:
+                        md.write(res.markdown.rstrip() + "\n")
+
         return md.getvalue()
