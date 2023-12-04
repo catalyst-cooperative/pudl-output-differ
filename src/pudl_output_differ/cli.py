@@ -226,7 +226,7 @@ def main() -> int:
             f.write(markdown.markdown(md, extensions=[GithubFlavoredMarkdownExtension()]))
             f.write('</article>')
         with fs.open(f"{report_path}.markdown", "w") as f:
-            f.write(markdown.markdown(md, extensions=[GithubFlavoredMarkdownExtension()]))
+            f.write(md)
 
     # TODO(rousik): add suopport for publishing comments to github PRs/analyses.
     return 0
