@@ -44,10 +44,16 @@ poetry run diff --html-report feature-xyz-report.html \
 
 The above will run the comparison on the files and will write html rendering of the
 comparison to `feature-xyz-report.html` file. It will also write raw markdown
-report to `feature-xyz-report.markdown` file as well. 
+report to `feature-xyz-report.markdown` file as well.
+
+The generated html report relies on the presence of `github-markdown-light.css` which
+is part of this repository. So if you generate reports into your git checkout directory
+and open them with the browser, they should render properly.
 
 Few notable parameters:
-* `--max-workers` controls how many concurrent threads will be used for comparison
+* `--max-workers` controls how many concurrent threads will be used for comparison. More
+  threads will lead to faster completion, but will increase memory pressure and might
+  lead to some sqlite concurrency/locking issues.
 * `--otel-trace-backend http://localhost:4317` if you're running tracing services
   such as jaeger-all-in-one, this will send the traces from the execution to this
   backend for later analysis.
