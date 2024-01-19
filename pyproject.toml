@@ -10,7 +10,7 @@ packages = [{include = "pudl_output_differ", from = "src"}]
 diff = "pudl_output_differ.cli:main"
 
 [tool.poetry.dependencies]
-python = "^3.10"
+python = "^3.11"
 pydantic = "^2.3.0"
 fsspec = "^2023.9.0"
 sqlalchemy = "^2.0.20"
@@ -21,8 +21,6 @@ pyarrow = "^13.0.0"
 opentelemetry-api = "^1.20.0"
 opentelemetry-sdk = "^1.20.0"
 apsw = "^3.43.1.0"
-github = "^1.2.7"
-pygithub = "^2.1.1"
 tabulate = "^0.9.0"
 opentelemetry-exporter-otlp-proto-grpc = "^1.20.0"
 markdown = "^3.5.1"
@@ -32,6 +30,7 @@ opentelemetry-exporter-gcp-trace = "^1.6.0"
 prometheus-client = "^0.19.0"
 psutil = "^5.9.6"
 progressbar2 = "^4.2.0"
+aiohttp = "3.9.1"
 
 
 [tool.poetry.group.dev.dependencies]

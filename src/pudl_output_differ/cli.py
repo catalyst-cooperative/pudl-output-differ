@@ -126,18 +126,6 @@ def parse_command_line(argv) -> argparse.Namespace:
         default=9101,
         help="Port on which to start prometheus metrics server."
     )
-    # parser.add_argument(
-    #     "--github-repo",
-    #     type=str,
-    #     default="",
-    #     help="Name of the github repository where comments should be posted.",
-    # )
-    # parser.add_argument(
-    #     "--github-pr",
-    #     type=int,
-    #     default=0,
-    #     help="If supplied, diff will be published as a comment to the github PR.",
-    # )
 
     arguments = parser.parse_args(argv[1:])
     return arguments
